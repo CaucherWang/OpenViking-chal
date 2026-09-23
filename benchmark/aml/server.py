@@ -12,12 +12,12 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Awaitable, Callable, Literal, TypeVar
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, TypeVar, cast
 
 import httpx
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from openviking_sdk import AsyncHTTPClient, OpenVikingError
+from openviking_sdk import AsyncHTTPClient, Message, OpenVikingError
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 DEFAULT_HOST = "127.0.0.1"
@@ -132,8 +132,19 @@ class AMLAddRequest(BaseModel):
     messages: list[AMLMessage] = Field(min_length=1, max_length=20)
     user_id: str = Field(min_length=1)
     session_id: str = Field(min_length=1)
+    commit: bool = True
 
     _request_id_not_blank = field_validator("request_id")(_not_blank)
+    _user_id_not_blank = field_validator("user_id")(_not_blank)
+    _session_id_not_blank = field_validator("session_id")(_not_blank)
+
+
+class AMLCommitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+
     _user_id_not_blank = field_validator("user_id")(_not_blank)
     _session_id_not_blank = field_validator("session_id")(_not_blank)
 
@@ -193,6 +204,7 @@ class OpenVikingBackend:
             except (httpx.RequestError, OpenVikingError) as exc:
                 retryable = isinstance(exc, httpx.RequestError) or (
                     exc.code in RETRYABLE_OPENVIKING_CODES
+                    or (exc.code == "CONFLICT" and exc.details.get("retryable") is True)
                 )
                 if not retryable or attempt + 1 == self.settings.retry_attempts:
                     raise OpenVikingBackendError(f"OpenViking {operation} failed: {exc}") from exc
@@ -206,45 +218,96 @@ class OpenVikingBackend:
         except (httpx.RequestError, OpenVikingError, RuntimeError, ValueError):
             return False
 
+    async def has_user_data(self, *, user_id: str, session_id: str) -> bool:
+        async with self._client(user_id) as client:
+            try:
+                await client.get_session(session_id)
+                return True
+            except OpenVikingError as exc:
+                if exc.code != "NOT_FOUND":
+                    raise OpenVikingBackendError(
+                        f"OpenViking session lookup failed: {exc}"
+                    ) from exc
+
+            try:
+                await client.stat(MEMORY_ROOT_URI)
+                return True
+            except OpenVikingError as exc:
+                if exc.code == "NOT_FOUND":
+                    return False
+                raise OpenVikingBackendError(f"OpenViking memory lookup failed: {exc}") from exc
+
+    async def clear_user_data(self, *, user_id: str) -> None:
+        async with self._client(user_id) as client:
+            await self._retry(
+                "user data deletion",
+                lambda: client.rm(
+                    f"viking://user/{user_id}",
+                    recursive=True,
+                    wait=False,
+                ),
+            )
+
     async def add_and_commit(
         self, *, user_id: str, session_id: str, messages: list[dict[str, Any]]
     ) -> None:
         async with self._client(user_id) as client:
-            result = await self._retry(
-                "batch add",
-                lambda: client.batch_add_messages(session_id, messages),
-            )
-            if not isinstance(result, dict) or result.get("added") != len(messages):
-                raise OpenVikingBackendError("OpenViking did not add every message")
+            await self._add_messages(client, session_id, messages)
+            await self._commit_session(client, session_id)
 
-            commit = await self._retry(
-                "commit",
-                lambda: client.commit_session(session_id, keep_recent_count=0),
-            )
-            if not isinstance(commit, dict):
-                raise OpenVikingBackendError("OpenViking did not accept the commit")
-            task_id = commit.get("task_id")
-            if commit.get("status") != "accepted" or not isinstance(task_id, str) or not task_id:
-                raise OpenVikingBackendError("OpenViking did not accept the commit")
+    async def add_messages(
+        self, *, user_id: str, session_id: str, messages: list[dict[str, Any]]
+    ) -> None:
+        async with self._client(user_id) as client:
+            await self._add_messages(client, session_id, messages)
 
-            deadline = time.monotonic() + self.settings.extraction_timeout_seconds
-            while True:
-                task = await self._retry("task poll", lambda: client.get_task(task_id))
-                if not isinstance(task, dict):
-                    raise OpenVikingBackendError("OpenViking returned an invalid commit task")
-                task_status = task.get("status")
-                if task_status == "completed":
-                    return
-                if task_status in {"failed", "cancelled"}:
-                    raise OpenVikingBackendError(
-                        f"OpenViking commit {task_status}: {task.get('error') or 'unknown error'}"
-                    )
-                if task_status not in {"pending", "running", "cancelling"}:
-                    raise OpenVikingBackendError("OpenViking returned an unknown commit status")
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise OpenVikingBackendError("OpenViking commit timed out")
-                await asyncio.sleep(min(self.settings.task_poll_seconds, remaining))
+    async def commit_session(self, *, user_id: str, session_id: str) -> None:
+        async with self._client(user_id) as client:
+            await self._commit_session(client, session_id)
+
+    async def _add_messages(
+        self,
+        client: AsyncHTTPClient,
+        session_id: str,
+        messages: list[dict[str, Any]],
+    ) -> None:
+        sdk_messages = cast(list[Message], messages)
+        result = await self._retry(
+            "batch add",
+            lambda: client.batch_add_messages(session_id, sdk_messages),
+        )
+        if not isinstance(result, dict) or result.get("added") != len(messages):
+            raise OpenVikingBackendError("OpenViking did not add every message")
+
+    async def _commit_session(self, client: AsyncHTTPClient, session_id: str) -> None:
+        commit = await self._retry(
+            "commit",
+            lambda: client.commit_session(session_id, keep_recent_count=0),
+        )
+        if not isinstance(commit, dict):
+            raise OpenVikingBackendError("OpenViking did not accept the commit")
+        task_id = commit.get("task_id")
+        if commit.get("status") != "accepted" or not isinstance(task_id, str) or not task_id:
+            raise OpenVikingBackendError("OpenViking did not accept the commit")
+
+        deadline = time.monotonic() + self.settings.extraction_timeout_seconds
+        while True:
+            task = await self._retry("task poll", lambda: client.get_task(task_id))
+            if not isinstance(task, dict):
+                raise OpenVikingBackendError("OpenViking returned an invalid commit task")
+            task_status = task.get("status")
+            if task_status == "completed":
+                return
+            if task_status in {"failed", "cancelled"}:
+                raise OpenVikingBackendError(
+                    f"OpenViking commit {task_status}: {task.get('error') or 'unknown error'}"
+                )
+            if task_status not in {"pending", "running", "cancelling"}:
+                raise OpenVikingBackendError("OpenViking returned an unknown commit status")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise OpenVikingBackendError("OpenViking commit timed out")
+            await asyncio.sleep(min(self.settings.task_poll_seconds, remaining))
 
     async def find(self, *, user_id: str, query: str, limit: int) -> list[dict[str, Any]]:
         async with self._client(user_id) as client:
@@ -303,11 +366,18 @@ class AMLAdapter:
                 item["created_at"] = _format_timestamp(message.timestamp)
             messages.append(item)
         try:
-            await self.backend.add_and_commit(
-                user_id=request.user_id,
-                session_id=request.session_id,
-                messages=messages,
-            )
+            if request.commit:
+                await self.backend.add_and_commit(
+                    user_id=request.user_id,
+                    session_id=request.session_id,
+                    messages=messages,
+                )
+            else:
+                await self.backend.add_messages(
+                    user_id=request.user_id,
+                    session_id=request.session_id,
+                    messages=messages,
+                )
         except OpenVikingBackendError as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
@@ -315,6 +385,23 @@ class AMLAdapter:
         return {
             "success": True,
             "request_id": request.request_id,
+            "user_id": request.user_id,
+            "session_id": request.session_id,
+            "committed": request.commit,
+        }
+
+    async def commit(self, request: AMLCommitRequest) -> dict[str, Any]:
+        try:
+            await self.backend.commit_session(
+                user_id=request.user_id,
+                session_id=request.session_id,
+            )
+        except OpenVikingBackendError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from exc
+        return {
+            "success": True,
             "user_id": request.user_id,
             "session_id": request.session_id,
         }

@@ -293,7 +293,14 @@ class EmbedderBase(ABC):
 
         return await retry_async(
             _wrapped,
-            max_retries=self.max_retries,
+            # seed-2.1pro has rate limit, retry it greedily to avoid task failure
+            # max_retries=self.max_retries,
+            max_retries=20000,
+            max_delay=60,
+
+
+
+
             logger=logger,
             operation_name=operation_name,
         )
