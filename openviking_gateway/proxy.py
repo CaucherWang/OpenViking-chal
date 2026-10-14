@@ -7,6 +7,7 @@ import json
 import logging
 import time
 import uuid
+from typing import Any
 
 import aiohttp
 import orjson
@@ -39,6 +40,38 @@ PATH_PROTOCOL = {
     "/v1/chat/completions": "chat",
     "/v1/responses": "responses",
 }
+
+
+def drop_invalid_encrypted_reasoning(body, content):
+    """Drop encrypted reasoning after an upstream verification error."""
+    if not isinstance(body, dict) or not isinstance(body.get("input"), list):
+        return 0
+    try:
+        payload = orjson.loads(content)
+    except (ValueError, TypeError):
+        return 0
+    error = payload.get("error", {}) if isinstance(payload, dict) else {}
+    if not isinstance(error, dict) and isinstance(payload, dict):
+        error = {}
+    if not error and isinstance(payload, dict) and isinstance(payload.get("message"), str):
+        try:
+            nested = orjson.loads(payload["message"])
+            error = nested.get("error", {}) if isinstance(nested, dict) else {}
+        except (ValueError, TypeError):
+            return 0
+    if not (isinstance(error, dict) and error.get("code") == "invalid_encrypted_content"):
+        return 0
+    candidates = [
+        item
+        for item in body["input"]
+        if isinstance(item, dict)
+        and item.get("type") == "reasoning"
+        and item.get("encrypted_content")
+    ]
+    if not candidates:
+        return 0
+    body["input"] = [item for item in body["input"] if item not in candidates]
+    return len(candidates)
 
 
 def filtered_headers(headers, request=False):
@@ -128,7 +161,10 @@ class ProxyRequest:
                 break
         self.protocol = PATH_PROTOCOL.get(self.path)
         self.prepared = None
-        self.metrics = {"request_id": uuid.uuid4().hex, "kind": "passthrough"}
+        self.metrics: dict[str, Any] = {
+            "request_id": uuid.uuid4().hex,
+            "kind": "passthrough",
+        }
 
     async def run(self):
         if self.request.headers.get("upgrade", "").lower() == "websocket":
@@ -151,13 +187,11 @@ class ProxyRequest:
             self.headers.setdefault("content-type", "application/json")
         self.started = time.monotonic()
         try:
-            self.response = await self.app.state.http.request(
+            self.response = await self.upstream_request(
                 self.request.method,
-                self.target,
-                data=self.raw or None,
-                headers=self.headers,
-                timeout=aiohttp.ClientTimeout(total=self.config.upstream_timeout_seconds),
-                allow_redirects=False,
+                self.body,
+                self.raw or None,
+                aiohttp.ClientTimeout(total=self.config.upstream_timeout_seconds),
             )
         except (aiohttp.ClientError, asyncio.TimeoutError):
             raise HTTPException(502, "Model upstream is unavailable")
@@ -262,6 +296,63 @@ class ProxyRequest:
         mapped = upstream.get("aliases", {}).get(self.model)
         return {**body, "model": mapped} if mapped else body
 
+    async def upstream_request(self, method, body, data, timeout):
+        """Send once, retrying a Responses request only for rejected encrypted reasoning."""
+        response = await self.app.state.http.request(
+            method,
+            self.target,
+            data=data,
+            headers=self.headers,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+        content = b""
+        if self.protocol == "responses" and response.status == 400:
+            try:
+                content = await response.read()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+                logger.warning(
+                    "Failed to inspect Responses upstream error; request_id=%s "
+                    "upstream_id=%s model=%s error=%s",
+                    self.metrics["request_id"],
+                    self.upstream["id"],
+                    self.model,
+                    type(error).__name__,
+                )
+                return response
+        dropped = drop_invalid_encrypted_reasoning(body, content)
+        if not dropped:
+            return response
+        error_count = int(self.metrics.get("encrypted_reasoning_error_count", 0)) + 1
+        dropped_total = int(self.metrics.get("encrypted_reasoning_items_dropped", 0)) + dropped
+        self.metrics.update(
+            encrypted_reasoning_error="invalid_encrypted_content",
+            encrypted_reasoning_error_count=error_count,
+            encrypted_reasoning_initial_status=response.status,
+            encrypted_reasoning_items_dropped=dropped_total,
+            encrypted_reasoning_retry=True,
+        )
+        logger.warning(
+            "Responses upstream rejected replayed encrypted reasoning; request_id=%s "
+            "upstream_id=%s model=%s dropped_items=%s occurrence=%s",
+            self.metrics["request_id"],
+            self.upstream["id"],
+            self.model,
+            dropped,
+            error_count,
+        )
+        response.close()
+        retry = await self.app.state.http.request(
+            method,
+            self.target,
+            data=orjson.dumps(body),
+            headers=self.headers,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+        self.metrics["encrypted_reasoning_retry_status"] = retry.status
+        return retry
+
     async def summarize(self, prepared, body):
         """Send the kernel's summary request to the session's upstream and parse the reply."""
         upstream = prepared.upstream
@@ -350,14 +441,11 @@ class ProxyRequest:
 
         async def send(payload, timeout):
             # Without a total tool deadline each continuation gets the usual upstream timeout.
-            return await self.app.state.http.post(
-                self.target,
-                data=orjson.dumps(payload),
-                headers=self.headers,
-                timeout=aiohttp.ClientTimeout(
-                    total=timeout or self.config.upstream_timeout_seconds
-                ),
-                allow_redirects=False,
+            return await self.upstream_request(
+                "POST",
+                payload,
+                orjson.dumps(payload),
+                aiohttp.ClientTimeout(total=timeout or self.config.upstream_timeout_seconds),
             )
 
         async def stream():
