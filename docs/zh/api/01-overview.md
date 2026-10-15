@@ -539,7 +539,7 @@ JSON 输出 - 错误：
 | GET | `/gateway/admin/logs` | 读取调用方可见的请求日志 |
 | GET | `/gateway/admin/upstreams` | 列出本账号的上游 |
 | PUT / DELETE | `/gateway/admin/upstreams/{identifier}` | 创建/替换或删除上游 |
-| POST | `/gateway/admin/upstreams/{identifier}/test` | 测试上游连接 |
+| POST | `/gateway/admin/upstreams/{identifier}/test` | 测试上游连接或模型 |
 | POST | `/gateway/admin/upstreams/import-vlm` | 把 Server 的 VLM 配置导入为上游（仅嵌入部署） |
 | GET | `/gateway/admin/policies` | 列出本账号的上下文配置 |
 | PUT / DELETE | `/gateway/admin/policies/{identifier}` | 创建/替换或删除上下文配置 |

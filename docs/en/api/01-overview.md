@@ -544,7 +544,7 @@ When the gateway runs inside the server, use the server's port; when it runs sta
 | GET | `/gateway/admin/logs` | Read the request logs the caller can see |
 | GET | `/gateway/admin/upstreams` | List the account's upstreams |
 | PUT / DELETE | `/gateway/admin/upstreams/{identifier}` | Create/replace or delete an upstream |
-| POST | `/gateway/admin/upstreams/{identifier}/test` | Test an upstream connection |
+| POST | `/gateway/admin/upstreams/{identifier}/test` | Test an upstream connection or model |
 | POST | `/gateway/admin/upstreams/import-vlm` | Import the server's VLM settings as upstreams (embedded only) |
 | GET | `/gateway/admin/policies` | List the account's context profiles |
 | PUT / DELETE | `/gateway/admin/policies/{identifier}` | Create/replace or delete a context profile |

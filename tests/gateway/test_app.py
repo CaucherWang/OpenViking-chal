@@ -890,7 +890,7 @@ async def test_large_first_tool_request_keeps_client_token_limit(running_gateway
 
 
 @pytest.mark.parametrize("vendor", ["ark", "byteplus"])
-async def test_ark_connection_test_lists_models_under_api_v3(running_gateway, vendor):
+async def test_ark_connection_test_generates_under_api_v3(running_gateway, vendor):
     app, client, admin, _, seen, _ = running_gateway
     upstream = await app.state.management.get("tenant", "upstreams", "chat")
     await app.state.management.save(
@@ -903,9 +903,11 @@ async def test_ark_connection_test_lists_models_under_api_v3(running_gateway, ve
             "base_url": upstream["base_url"].removesuffix("/v1") + "/api/v3",
         },
     )
-    response = await client.post("/admin/upstreams/chat/test", headers=admin)
+    response = await client.post(
+        "/admin/upstreams/chat/test", headers=admin, json={"model": "model"}
+    )
     assert response.json()["ok"] and response.json()["status"] == 200
-    assert seen[-1][0] == "/api/v3/models"
+    assert seen[-1][0] == "/api/v3/chat/completions"
 
 
 async def test_ark_burst_is_forwarded_without_local_429(running_gateway):
