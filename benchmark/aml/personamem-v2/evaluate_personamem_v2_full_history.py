@@ -4,156 +4,101 @@
 For every benchmark row, this baseline sends the original history messages,
 the official user query, and (in MCQ mode) the official option instruction to
 the answer model. It does not ingest, search, or retrieve memories.
+
+Use ``--retry-errors --output <existing.csv>`` after a completed evaluation to
+rerun failed rows and atomically update the CSV and summary.
 """
 
 from __future__ import annotations
 
 import argparse
-import ast
 import asyncio
 import csv
 import json
 import os
-import random
-import re
 import sys
 import time
-from collections import OrderedDict, defaultdict
+import uuid
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-AML_ROOT = SCRIPT_DIR.parent
-REPOSITORY_ROOT = AML_ROOT.parents[1]
-DEFAULT_DATASET_ROOT = AML_ROOT / "data" / "personamem_v2"
-DEFAULT_BENCHMARK_FILE = DEFAULT_DATASET_ROOT / "benchmark" / "text" / "benchmark.csv"
-DEFAULT_OV_CONFIG = REPOSITORY_ROOT / ".openviking" / "ov.conf"
-RECALL_INSTRUCTION = (
-    " Please recall my related preferences from our conversation history "
-    "to give personalized responses."
-)
-SUMMARY_CATEGORIES = (
-    "persona_id",
-    "topic_query",
-    "topic_preference",
-    "conversation_scenario",
-    "pref_type",
-    "who",
-    "updated",
-    "sensitive_info",
-    "distance_from_related_snippet_to_query_32k",
-    "distance_from_related_snippet_to_query_128k",
-    "num_persona_relevant_tokens_128k",
-)
+if __package__:
+    from .utils import (
+        AML_ROOT,
+        DEFAULT_BENCHMARK_FILE,
+        DEFAULT_DATASET_ROOT,
+        DEFAULT_OV_CONFIG,
+        ES_AZURE_API_VERSION,
+        ES_AZURE_ENDPOINT,
+        GPT_4O_MINI_MODEL,
+        GPT_5_5_MODEL,
+        answer_with_model,
+        build_mcq_summary,
+        check_mcq_correctness,
+        create_answer_client,
+        create_mcq_options,
+        extract_final_answer,
+        load_answer_config,
+        parse_incorrect_answers,
+        parse_user_query,
+        read_benchmark_rows,
+        report_progress,
+        stable_row_seed,
+    )
+else:
+    from utils import (
+        AML_ROOT,
+        DEFAULT_BENCHMARK_FILE,
+        DEFAULT_DATASET_ROOT,
+        DEFAULT_OV_CONFIG,
+        ES_AZURE_API_VERSION,
+        ES_AZURE_ENDPOINT,
+        GPT_4O_MINI_MODEL,
+        GPT_5_5_MODEL,
+        answer_with_model,
+        build_mcq_summary,
+        check_mcq_correctness,
+        create_answer_client,
+        create_mcq_options,
+        extract_final_answer,
+        load_answer_config,
+        parse_incorrect_answers,
+        parse_user_query,
+        read_benchmark_rows,
+        report_progress,
+        stable_row_seed,
+    )
 
 
-def parse_user_query(raw_value: str) -> dict[str, str]:
-    """Parse the official user_query field and append its recall instruction."""
-    try:
-        parsed = json.loads(raw_value)
-    except json.JSONDecodeError:
+def read_result_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    field_limit = sys.maxsize
+    while True:
         try:
-            parsed = ast.literal_eval(raw_value)
-        except (SyntaxError, ValueError):
-            parsed = {"role": "user", "content": str(raw_value).strip("\"'")}
+            csv.field_size_limit(field_limit)
+            break
+        except OverflowError:
+            field_limit //= 10
 
-    if isinstance(parsed, dict):
-        role = str(parsed.get("role") or "user")
-        content = str(parsed.get("content", parsed.get("text", "")) or "")
-    else:
-        role = "user"
-        content = str(parsed)
-    if content and RECALL_INSTRUCTION.strip() not in content:
-        content += RECALL_INSTRUCTION
-    return {"role": role, "content": content}
-
-
-def parse_incorrect_answers(raw_value: str) -> list[str]:
-    if not raw_value:
-        return []
-    try:
-        parsed = json.loads(raw_value)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(parsed, list):
-        return []
-    return [str(value) for value in parsed]
-
-
-def create_mcq_options(
-    correct_answer: str,
-    incorrect_answers: list[str],
-    seed: int | None = None,
-) -> tuple[str, dict[str, str]]:
-    """Match the official PersonaMem-v2 option shuffle and instruction."""
-    options = [correct_answer] + incorrect_answers
-    random.Random(seed).shuffle(options)
-
-    option_mapping: dict[str, str] = {}
-    option_parts = []
-    for index, option in enumerate(options):
-        letter = chr(65 + index)
-        option_mapping[letter] = option
-        option_parts.append(f"{letter}. {option}")
-
-    instruction = (
-        "Please choose the best answer from the following options:\n\n"
-        + "\n".join(option_parts)
-        + "\n\nThink step by step about which answer best fits the user's query and conversation "
-        "context. Provide your reasoning first, then give your final answer as "
-        "'Final Answer: [Letter]'"
-    )
-    return instruction, option_mapping
-
-
-def extract_final_answer(response: str) -> str:
-    """Match the official final-answer extraction patterns."""
-    if not response:
-        return ""
-    patterns = (
-        r"\$\\boxed\{([A-Z])\}\$",
-        r"\\boxed\{([A-Z])\}",
-        r"Final Answer:\s*([A-Z])",
-        r"final answer:\s*([A-Z])",
-        r"Answer:\s*([A-Z])",
-        r"answer:\s*([A-Z])",
-        r"final answer is\s*\$?\\boxed\{([A-Z])\}\$?",
-        r"final answer is\s*([A-Z])",
-        r"the answer is\s*\$?\\boxed\{([A-Z])\}\$?",
-        r"the answer is\s*([A-Z])",
-        r"\b([A-Z])\.\s*$",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, response, re.IGNORECASE | re.MULTILINE)
-        if match:
-            return match.group(1).upper()
-    return ""
-
-
-def check_mcq_correctness(
-    predicted_answer: str,
-    correct_answer: str,
-    option_mapping: dict[str, str],
-) -> bool:
-    if not predicted_answer or not option_mapping:
-        return False
-    return option_mapping.get(predicted_answer.upper(), "") == correct_answer
-
-
-def read_benchmark_rows(
-    path: Path,
-    *,
-    limit: int | None,
-) -> tuple[list[str], list[dict[str, str]]]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames is None:
-            raise ValueError(f"benchmark has no CSV header: {path}")
+            raise ValueError(f"result CSV has no header: {path}")
         rows = list(reader)
         fieldnames = list(reader.fieldnames)
-    if limit is not None:
-        rows = rows[:limit]
+
+    incomplete = [
+        index + 2
+        for index, row in enumerate(rows)
+        if None in row or any(value is None for value in row.values())
+    ]
+    if incomplete:
+        preview = ", ".join(str(line) for line in incomplete[:5])
+        raise ValueError(
+            f"result CSV contains incomplete rows at line(s) {preview}; "
+            "wait for the original evaluation to finish"
+        )
     return fieldnames, rows
 
 
@@ -240,71 +185,6 @@ def full_history_messages(
     return messages
 
 
-def load_answer_config(path: Path) -> dict[str, str]:
-    if not path.is_file():
-        return {}
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    vlm = raw.get("vlm") if isinstance(raw, dict) else None
-    if not isinstance(vlm, dict):
-        return {}
-    return {
-        "model": str(vlm.get("model") or ""),
-        "api_key": str(vlm.get("api_key") or ""),
-        "api_base": str(vlm.get("api_base") or ""),
-    }
-
-
-def create_answer_client(args: argparse.Namespace) -> Any:
-    from volcenginesdkarkruntime import AsyncArk
-
-    return AsyncArk(
-        base_url=args.answer_base_url,
-        api_key=args.answer_api_key,
-        timeout=args.timeout,
-        max_retries=0,
-    )
-
-
-def response_output_text(response: Any) -> str:
-    output_text = [
-        str(content.text)
-        for item in response.output
-        if item.type == "message"
-        for content in item.content
-        if content.type == "output_text" and content.text
-    ]
-    answer = "\n".join(output_text).strip()
-    if not answer:
-        raise TypeError("answer model returned no output_text")
-    return answer
-
-
-async def answer_with_model(
-    client: Any,
-    *,
-    args: argparse.Namespace,
-    messages: list[dict[str, str]],
-) -> str:
-    for attempt in range(1, args.answer_retry_attempts + 1):
-        try:
-            response = await client.responses.create(
-                model=args.answer_model,
-                input=messages,
-            )
-            return response_output_text(response)
-        except Exception as exc:
-            print(
-                f"[answer attempt {attempt}/{args.answer_retry_attempts}] "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-                flush=True,
-            )
-            if attempt == args.answer_retry_attempts:
-                raise
-            await asyncio.sleep(args.retry_delay * (2 ** (attempt - 1)))
-    raise AssertionError("answer retry loop exited unexpectedly")
-
-
 def mode_columns(eval_mode: str, size: str) -> list[str]:
     columns = [
         f"history_file_{size}",
@@ -364,7 +244,7 @@ async def evaluate_row(
             output[f"history_message_count_{args.size}"] = len(history)
 
             if args.eval_mode in {"mcq", "both"}:
-                row_seed = hash(f"{persona_id}_{user_query['content']}") % 2**32
+                row_seed = stable_row_seed(persona_id, user_query["content"])
                 instruction, option_mapping = create_mcq_options(
                     str(row.get("correct_answer") or ""),
                     parse_incorrect_answers(str(row.get("incorrect_answers") or "")),
@@ -433,25 +313,11 @@ async def evaluate_row(
     return output
 
 
-def category_label(category: str, value: str) -> str:
-    if "distance_from_related_snippet_to_query" not in category:
-        return value
-    try:
-        distance = int(value)
-    except (TypeError, ValueError):
-        return value
-    start = (distance // 1024) * 1024
-    return f"{start}-{start + 1023}"
-
-
 def build_summary(
     rows: list[dict[str, Any]],
     *,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
-    correctness_column = f"is_correct_mcq_{args.size}"
-    scored = [row for row in rows if row.get(correctness_column) in {"True", "False"}]
-    correct = sum(row[correctness_column] == "True" for row in scored)
     summary: dict[str, Any] = {
         "evaluation_type": "full_history_no_memory",
         "benchmark_file": str(args.benchmark_file),
@@ -459,75 +325,171 @@ def build_summary(
         "output": str(args.output),
         "size": args.size,
         "eval_mode": args.eval_mode,
+        "answer_backend": args.answer_backend,
         "answer_model": args.answer_model,
         "rows": len(rows),
         "errors": sum(bool(row.get("evaluation_error")) for row in rows),
-        "mcq_scored": len(scored),
-        "mcq_correct": correct,
-        "mcq_accuracy": correct / len(scored) if scored else None,
     }
-    if not scored:
-        return summary
-
-    breakdown: dict[str, Any] = {}
-    for category in SUMMARY_CATEGORIES:
-        stats: defaultdict[str, dict[str, int]] = defaultdict(lambda: {"correct": 0, "total": 0})
-        for row in scored:
-            label = category_label(category, str(row.get(category, "")))
-            stats[label]["total"] += 1
-            if row[correctness_column] == "True":
-                stats[label]["correct"] += 1
-        breakdown[category] = {
-            label: {
-                **counts,
-                "accuracy": counts["correct"] / counts["total"],
-            }
-            for label, counts in sorted(stats.items())
-        }
-    summary["category_breakdown"] = breakdown
+    summary.update(build_mcq_summary(rows, args.size))
     return summary
 
 
-def report_progress(
-    current: int,
-    total: int,
-    errors: int,
+def validate_retry_source(
+    result_fields: list[str],
+    result_rows: list[dict[str, str]],
+    benchmark_rows: list[dict[str, str]],
     *,
-    started_at: float,
+    args: argparse.Namespace,
 ) -> None:
-    current_time = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
-    elapsed_seconds = int(time.monotonic() - started_at)
-    hours, remainder = divmod(elapsed_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    elapsed = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-    if sys.stderr.isatty():
-        width = 30
-        completed = width * current // max(total, 1)
-        bar = "#" * completed + "-" * (width - completed)
-        print(
-            f"\r{current_time} [{bar}] {current}/{total} rows | "
-            f"errors {errors} | elapsed {elapsed}",
-            end="\n" if current == total else "",
-            file=sys.stderr,
-            flush=True,
+    required_fields = set(mode_columns(args.eval_mode, args.size))
+    missing_fields = sorted(required_fields.difference(result_fields))
+    if missing_fields:
+        raise ValueError(
+            "result CSV is incompatible with the requested size/eval mode; "
+            f"missing columns: {', '.join(missing_fields)}"
         )
-    else:
-        print(
-            json.dumps(
-                {
-                    "time": current_time,
-                    "elapsed": elapsed,
-                    "elapsed_seconds": elapsed_seconds,
-                    "processed": current,
-                    "total": total,
-                    "errors": errors,
-                }
-            ),
-            flush=True,
+    has_mcq = f"model_response_mcq_{args.size}" in result_fields
+    has_openended = f"model_response_openended_{args.size}" in result_fields
+    detected_mode = (
+        "both"
+        if has_mcq and has_openended
+        else "mcq"
+        if has_mcq
+        else "generative"
+        if has_openended
+        else ""
+    )
+    if detected_mode != args.eval_mode:
+        raise ValueError(
+            f"result CSV eval mode is {detected_mode or 'unknown'}, but "
+            f"--eval-mode is {args.eval_mode}"
         )
+    if len(result_rows) != len(benchmark_rows):
+        raise ValueError(
+            f"result CSV has {len(result_rows)} rows but benchmark has "
+            f"{len(benchmark_rows)}; wait for the original evaluation to finish"
+        )
+
+    identity_fields = (
+        "persona_id",
+        f"chat_history_{args.size}_link",
+        "user_query",
+        "correct_answer",
+    )
+    for index, (result_row, benchmark_row) in enumerate(
+        zip(result_rows, benchmark_rows, strict=True),
+        start=1,
+    ):
+        if any(
+            result_row.get(field, "") != benchmark_row.get(field, "") for field in identity_fields
+        ):
+            raise ValueError(
+                f"result CSV row {index} does not match benchmark order; "
+                "wait for the original evaluation to finish or use its finalized CSV"
+            )
+
+
+async def retry_error_rows(args: argparse.Namespace) -> dict[str, Any]:
+    started_at = time.monotonic()
+    result_fields, result_rows = read_result_rows(args.output)
+    _, benchmark_rows = read_benchmark_rows(args.benchmark_file, limit=None)
+    validate_retry_source(
+        result_fields,
+        result_rows,
+        benchmark_rows,
+        args=args,
+    )
+
+    error_indexes = [
+        index for index, row in enumerate(result_rows) if row.get("evaluation_error", "").strip()
+    ]
+    selected_indexes = error_indexes[: args.limit]
+    print(
+        json.dumps(
+            {
+                "retry_errors": "started",
+                "output": str(args.output),
+                "rows": len(result_rows),
+                "existing_errors": len(error_indexes),
+                "selected_for_retry": len(selected_indexes),
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+
+    replacements: dict[int, dict[str, Any]] = {}
+    retry_failures = 0
+    if selected_indexes:
+        semaphore = asyncio.Semaphore(args.parallel)
+        history_loader = HistoryLoader()
+        answer_client = create_answer_client(args)
+        try:
+
+            async def evaluate_indexed_row(
+                row_index: int,
+            ) -> tuple[int, dict[str, Any]]:
+                output = await evaluate_row(
+                    result_rows[row_index],
+                    args=args,
+                    answer_client=answer_client,
+                    history_loader=history_loader,
+                    semaphore=semaphore,
+                )
+                return row_index, output
+
+            history_column = f"chat_history_{args.size}_link"
+            ordered_indexes = sorted(
+                selected_indexes,
+                key=lambda index: (
+                    result_rows[index].get(history_column, ""),
+                    index,
+                ),
+            )
+            tasks = [asyncio.create_task(evaluate_indexed_row(index)) for index in ordered_indexes]
+            for current, task in enumerate(asyncio.as_completed(tasks), start=1):
+                row_index, output = await task
+                replacements[row_index] = output
+                retry_failures += bool(output.get("evaluation_error"))
+                report_progress(
+                    current,
+                    len(tasks),
+                    retry_failures,
+                    started_at=started_at,
+                )
+        finally:
+            await answer_client.close()
+
+    merged_rows = [replacements.get(index, row) for index, row in enumerate(result_rows)]
+    retry_output = args.output.with_name(f".{args.output.name}.retry.tmp")
+    with retry_output.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=result_fields)
+        writer.writeheader()
+        writer.writerows(merged_rows)
+    retry_output.replace(args.output)
+
+    summary = build_summary(merged_rows, args=args)
+    summary["retry"] = {
+        "existing_errors": len(error_indexes),
+        "attempted": len(selected_indexes),
+        "recovered": len(selected_indexes) - retry_failures,
+        "failed_again": retry_failures,
+        "remaining_errors": sum(
+            bool(row.get("evaluation_error", "").strip()) for row in merged_rows
+        ),
+    }
+    args.summary_output.parent.mkdir(parents=True, exist_ok=True)
+    args.summary_output.write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return summary
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
+    if args.retry_errors:
+        return await retry_error_rows(args)
+
     started_at = time.monotonic()
     source_fields, rows = read_benchmark_rows(
         args.benchmark_file,
@@ -623,7 +585,11 @@ def parse_args() -> argparse.Namespace:
         choices=["mcq", "generative", "both"],
         default="mcq",
     )
-    parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help=("Maximum benchmark rows, or maximum failed rows in --retry-errors mode."),
+    )
     parser.add_argument("--parallel", type=int, default=25)
     parser.add_argument("--timeout", type=float, default=900.0)
     parser.add_argument(
@@ -634,16 +600,32 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--retry-delay", type=float, default=0.5)
     parser.add_argument("--ov-config", type=Path, default=DEFAULT_OV_CONFIG)
+    parser.add_argument(
+        "--answer-backend",
+        choices=["seed", "gpt-4o-mini", "gpt-5.5"],
+        default=os.getenv("PERSONAMEM_ANSWER_BACKEND", "seed"),
+    )
     parser.add_argument("--answer-model")
     parser.add_argument("--answer-base-url")
     parser.add_argument("--answer-api-key")
+    parser.add_argument("--answer-log-id")
+    parser.add_argument("--answer-max-tokens", type=int, default=500)
+    parser.add_argument(
+        "--retry-errors",
+        action="store_true",
+        help=(
+            "Retry rows whose evaluation_error is non-empty in the existing "
+            "--output CSV, then atomically update that CSV and its summary. "
+            "Run only after the original evaluation has finished."
+        ),
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--summary-output", type=Path)
     args = parser.parse_args()
 
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
-    for name in ("parallel", "answer_retry_attempts"):
+    for name in ("parallel", "answer_retry_attempts", "answer_max_tokens"):
         if getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.timeout <= 0 or args.retry_delay < 0:
@@ -652,17 +634,56 @@ def parse_args() -> argparse.Namespace:
         parser.error(f"benchmark file does not exist: {args.benchmark_file}")
     if not args.dataset_root.is_dir():
         parser.error(f"dataset root does not exist: {args.dataset_root}")
+    if args.retry_errors:
+        if args.output is None:
+            parser.error("--retry-errors requires an explicit --output CSV")
+        if not args.output.is_file():
+            parser.error(f"retry result CSV does not exist: {args.output}")
 
     answer_config = load_answer_config(args.ov_config)
-    args.answer_model = (
-        args.answer_model or os.getenv("DOUBAO_VLM_MODEL") or answer_config.get("model", "")
-    )
-    args.answer_base_url = (
-        args.answer_base_url or os.getenv("ARK_API_BASE") or answer_config.get("api_base", "")
-    )
-    args.answer_api_key = (
-        args.answer_api_key or os.getenv("ARK_API_KEY") or answer_config.get("api_key", "")
-    )
+    if args.answer_backend == "seed":
+        args.answer_model = (
+            args.answer_model or os.getenv("DOUBAO_VLM_MODEL") or answer_config.get("model", "")
+        )
+        args.answer_base_url = (
+            args.answer_base_url or os.getenv("ARK_API_BASE") or answer_config.get("api_base", "")
+        )
+        args.answer_api_key = (
+            args.answer_api_key
+            or os.getenv("ARK_API_KEY")
+            or answer_config.get("893_api_key", "")
+            or answer_config.get("api_key", "")
+        )
+        args.answer_api_version = None
+        args.answer_log_id = None
+    elif args.answer_backend == "gpt-4o-mini":
+        args.answer_model = GPT_4O_MINI_MODEL
+        args.answer_base_url = ES_AZURE_ENDPOINT
+        args.answer_api_key = (
+            args.answer_api_key
+            or answer_config.get("gpt_4o_mini_key", "")
+            or os.getenv("GPT_4O_MINI_API_KEY", "")
+        )
+        args.answer_api_version = ES_AZURE_API_VERSION
+        args.answer_log_id = (
+            args.answer_log_id
+            or os.getenv("ES_MODEL_LOG_ID")
+            or f"personamem-v2-{uuid.uuid4().hex}"
+        )
+    else:
+        args.answer_model = GPT_5_5_MODEL
+        args.answer_base_url = ES_AZURE_ENDPOINT
+        args.answer_api_key = (
+            args.answer_api_key
+            or answer_config.get("gpt_5_5_key", "")
+            or os.getenv("GPT_5_5_API_KEY", "")
+        )
+        args.answer_api_version = ES_AZURE_API_VERSION
+        args.answer_log_id = (
+            args.answer_log_id
+            or os.getenv("ES_MODEL_LOG_ID")
+            or f"personamem-v2-{uuid.uuid4().hex}"
+        )
     missing = [
         name
         for name, value in (
@@ -673,9 +694,14 @@ def parse_args() -> argparse.Namespace:
         if not value
     ]
     if missing:
+        if args.answer_backend == "seed":
+            source = "configure .openviking/ov.conf"
+        elif args.answer_backend == "gpt-4o-mini":
+            source = "configure vlm.gpt_4o_mini_key in .openviking/ov.conf"
+        else:
+            source = "set GPT_5_5_API_KEY or configure vlm.gpt_5_5_key"
         parser.error(
-            f"missing {', '.join(missing)}; configure .openviking/ov.conf "
-            "or pass the corresponding --answer-* option"
+            f"missing {', '.join(missing)}; {source} or pass the corresponding --answer-* option"
         )
 
     args.output = args.output or default_output_path(args.size, args.eval_mode)

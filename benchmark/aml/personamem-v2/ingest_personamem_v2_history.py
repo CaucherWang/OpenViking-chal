@@ -14,20 +14,21 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 
-DEFAULT_HISTORY_DIR = (
-    Path(__file__).resolve().parent / "data" / "personamem_v2" / "data" / "chat_history_32k"
-)
-DEFAULT_BENCHMARK_DIR = (
-    Path(__file__).resolve().parent / "data" / "personamem_v2" / "benchmark" / "text"
-)
-HTTP_MAX_ADD_MESSAGES = 20
-DIRECT_MAX_ADD_MESSAGES = 100
+if __package__:
+    from .utils import DEFAULT_DATASET_ROOT, EXPERIMENT_NAME_RE, format_elapsed, post_json
+else:
+    from utils import DEFAULT_DATASET_ROOT, EXPERIMENT_NAME_RE, format_elapsed, post_json
+
+DEFAULT_DATASET_DIR = DEFAULT_DATASET_ROOT
+DEFAULT_HISTORY_DIR = DEFAULT_DATASET_DIR / "data" / "chat_history_32k"
+DEFAULT_BENCHMARK_DIR = DEFAULT_DATASET_DIR / "benchmark" / "text"
+DEFAULT_MAX_CHUNK_MESSAGES = 20
+DEFAULT_MAX_CHUNK_WORDS = 1_000_000_000
 PERSONA_RE = re.compile(r"(persona\d+)")
-EXPERIMENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 DEFAULT_HISTORY_PREFIX = "250913"
 PERSONA_SPLITS = ("train", "val", "benchmark")
 COMMIT_MODES = ("after-each-batch", "once-per-persona")
@@ -158,20 +159,6 @@ def read_history(path: Path) -> tuple[str, list[dict[str, Any]]]:
     return persona_id, messages
 
 
-async def post_json(
-    client: httpx.AsyncClient,
-    url: str,
-    payload: dict[str, Any],
-    headers: dict[str, str],
-) -> dict[str, Any]:
-    response = await client.post(url, json=payload, headers=headers)
-    response.raise_for_status()
-    result = response.json()
-    if not isinstance(result, dict):
-        raise TypeError(f"expected JSON object from {url}")
-    return result
-
-
 def direct_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result = []
     for message in messages:
@@ -183,6 +170,36 @@ def direct_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def chunk_messages(
+    messages: list[dict[str, Any]],
+    *,
+    max_messages: int,
+    max_words: int,
+) -> Iterator[list[dict[str, Any]]]:
+    """Split messages in source order at either deterministic boundary."""
+    chunk: list[dict[str, Any]] = []
+    chunk_words = 0
+
+    for message in messages:
+        message_words = len(str(message["content"]).split())
+        if chunk and (
+            len(chunk) >= max_messages or chunk_words + message_words > max_words
+        ):
+            yield chunk
+            chunk = []
+            chunk_words = 0
+
+        chunk.append(message)
+        chunk_words += message_words
+        if len(chunk) >= max_messages or chunk_words >= max_words:
+            yield chunk
+            chunk = []
+            chunk_words = 0
+
+    if chunk:
+        yield chunk
+
+
 async def ingest_history_file_http(
     client: httpx.AsyncClient,
     *,
@@ -191,19 +208,25 @@ async def ingest_history_file_http(
     user_id_prefix: str,
     path: Path,
     commit_once: bool,
+    max_chunk_messages: int,
+    max_chunk_words: int,
 ) -> dict[str, Any]:
     persona_id, messages = read_history(path)
     user_id = f"{user_id_prefix}-{persona_id}"
     session_id = f"history-{persona_id}"
     add_requests = 0
 
-    for chunk_index in range(0, len(messages), HTTP_MAX_ADD_MESSAGES):
-        chunk = messages[chunk_index : chunk_index + HTTP_MAX_ADD_MESSAGES]
+    chunks = chunk_messages(
+        messages,
+        max_messages=max_chunk_messages,
+        max_words=max_chunk_words,
+    )
+    for chunk_index, chunk in enumerate(chunks):
         await post_json(
             client,
             adapter_url.rstrip("/") + "/add",
             {
-                "request_id": f"{user_id}:chunk-{chunk_index // HTTP_MAX_ADD_MESSAGES}",
+                "request_id": f"{user_id}:chunk-{chunk_index}",
                 "messages": chunk,
                 "user_id": user_id,
                 "session_id": session_id,
@@ -240,14 +263,20 @@ async def ingest_history_file_direct(
     user_id_prefix: str,
     path: Path,
     commit_once: bool,
+    max_chunk_messages: int,
+    max_chunk_words: int,
 ) -> dict[str, Any]:
     persona_id, messages = read_history(path)
     user_id = f"{user_id_prefix}-{persona_id}"
     session_id = f"history-{persona_id}"
     add_requests = 0
 
-    for chunk_index in range(0, len(messages), DIRECT_MAX_ADD_MESSAGES):
-        chunk = messages[chunk_index : chunk_index + DIRECT_MAX_ADD_MESSAGES]
+    chunks = chunk_messages(
+        messages,
+        max_messages=max_chunk_messages,
+        max_words=max_chunk_words,
+    )
+    for chunk in chunks:
         add = backend.add_messages if commit_once else backend.add_and_commit
         await add(user_id=user_id, session_id=session_id, messages=direct_messages(chunk))
         add_requests += 1
@@ -274,13 +303,6 @@ def sorted_history_files(history_dir: Path, history_prefix: str) -> list[Path]:
 
     pattern = f"chat_history_{history_prefix}_*.json"
     return sorted(history_dir.glob(pattern), key=sort_key)
-
-
-def format_elapsed(seconds: float) -> str:
-    total_seconds = int(seconds)
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 def finish_summary(summary: dict[str, Any], started_at: float) -> None:
@@ -445,6 +467,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         "experiment_name": args.experiment_name,
         "user_id_prefix": user_id_prefix,
         "commit_mode": args.commit_mode,
+        "max_chunk_messages": args.max_chunk_messages,
+        "max_chunk_words": args.max_chunk_words,
         "history_prefix": args.history_prefix,
         "selection_source": selection_source,
         "requested_persona_ids": args.persona_ids or [],
@@ -469,14 +493,18 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         "failures": [],
     }
     if args.dry_run:
-        chunk_size = (
-            DIRECT_MAX_ADD_MESSAGES if args.ingest_mode == "direct" else HTTP_MAX_ADD_MESSAGES
-        )
         for path in files:
             try:
                 _, messages = read_history(path)
                 summary["messages"] += len(messages)
-                add_requests = (len(messages) + chunk_size - 1) // chunk_size
+                add_requests = sum(
+                    1
+                    for _ in chunk_messages(
+                        messages,
+                        max_messages=args.max_chunk_messages,
+                        max_words=args.max_chunk_words,
+                    )
+                )
                 summary["add_requests"] += add_requests
                 summary["commit_requests"] += 1 if commit_once else add_requests
             except Exception as exc:
@@ -550,6 +578,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                             user_id_prefix=user_id_prefix,
                             path=path,
                             commit_once=commit_once,
+                            max_chunk_messages=args.max_chunk_messages,
+                            max_chunk_words=args.max_chunk_words,
                         )
                     else:
                         result = await ingest_history_file_http(
@@ -559,6 +589,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                             user_id_prefix=user_id_prefix,
                             path=path,
                             commit_once=commit_once,
+                            max_chunk_messages=args.max_chunk_messages,
+                            max_chunk_words=args.max_chunk_words,
                         )
                     outcome.update(
                         {
@@ -633,7 +665,7 @@ def main() -> None:
         "--persona-splits",
         nargs="+",
         choices=PERSONA_SPLITS,
-        default=["train"],
+        default=["benchmark"],
         help=(
             "Only ingest personas referenced by non-empty user_query rows in the "
             "selected train, val, or benchmark CSV files."
@@ -655,7 +687,7 @@ def main() -> None:
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=1,
+        default=20,
         help="Maximum number of personas to ingest concurrently.",
     )
     parser.add_argument("--adapter-url", default="http://127.0.0.1:8088")
@@ -680,8 +712,23 @@ def main() -> None:
             "before committing its session once."
         ),
     )
-    parser.add_argument("--timeout", type=float, default=900.0)
-    parser.add_argument("--extraction-timeout", type=float, default=900.0)
+    parser.add_argument(
+        "--max-chunk-messages",
+        type=int,
+        default=DEFAULT_MAX_CHUNK_MESSAGES,
+        help="Start a new deterministic add chunk after this many messages.",
+    )
+    parser.add_argument(
+        "--max-chunk-words",
+        type=int,
+        default=DEFAULT_MAX_CHUNK_WORDS,
+        help=(
+            "Start a new deterministic add chunk when adding another message would "
+            "exceed this many whitespace-delimited words."
+        ),
+    )
+    parser.add_argument("--timeout", type=float, default=1200.0)
+    parser.add_argument("--extraction-timeout", type=float, default=1200.0)
     parser.add_argument("--task-poll-seconds", type=float, default=1.0)
     parser.add_argument(
         "--retry-attempts",
@@ -702,6 +749,10 @@ def main() -> None:
         parser.error("--limit must be positive")
     if args.concurrency < 1:
         parser.error("--concurrency must be positive")
+    if args.max_chunk_messages < 1 or args.max_chunk_messages > 20:
+        parser.error("--max-chunk-messages must be between 1 and 20")
+    if args.max_chunk_words < 1:
+        parser.error("--max-chunk-words must be positive")
     if args.retry_attempts < 1:
         parser.error("--retry-attempts must be positive")
     if not math.isfinite(args.retry_delay_seconds) or args.retry_delay_seconds <= 0:

@@ -56,7 +56,7 @@ class AMLSettings:
     openviking_api_key: str | None = None
     openviking_account: str | None = None
     aml_api_key: str | None = None
-    retry_attempts: int = 3
+    retry_attempts: int = 5
     retry_delay_seconds: float = 0.5
     request_timeout_seconds: float = 120.0
     extraction_timeout_seconds: float = 900.0
