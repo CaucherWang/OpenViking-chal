@@ -79,6 +79,7 @@ function upstream(overrides: Partial<Upstream>): Upstream {
     name: 'Upstream',
     protocol: 'chat',
     base_url: 'https://api.example.com/v1',
+    append_endpoint_path: true,
     auth_mode: 'managed',
     models: [],
     aliases: {},

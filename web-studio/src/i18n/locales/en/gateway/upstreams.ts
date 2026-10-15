@@ -202,6 +202,11 @@ const upstreams = {
       correctPath: 'Use {{url}}',
       useDefault: 'Use default',
     },
+    appendEndpointPath: {
+      label: 'Append protocol endpoint path',
+      description:
+        'Adds the path for the selected protocol to the Base URL. Turn this off when the Base URL is already the complete request endpoint.',
+    },
     authMode: {
       label: 'Who provides the API key',
       managed: {

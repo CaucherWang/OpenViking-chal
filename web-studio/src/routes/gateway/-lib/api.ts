@@ -58,6 +58,8 @@ type UpstreamSettings = {
   name: string
   protocol: Protocol
   base_url: string
+  /** Append the selected protocol's endpoint path to base_url. */
+  append_endpoint_path: boolean
   auth_mode: AuthMode
   models: string[]
   /** Name clients use → model sent to the upstream. */

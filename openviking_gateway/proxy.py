@@ -63,6 +63,8 @@ def filtered_headers(headers, request=False):
 
 def upstream_url(upstream, path):
     base = upstream["base_url"].rstrip("/")
+    if not upstream.get("append_endpoint_path", True):
+        return base
     if upstream["protocol"] != "anthropic":
         path = path.removeprefix("/v1")
     return base + path

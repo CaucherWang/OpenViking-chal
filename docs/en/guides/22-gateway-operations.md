@@ -248,6 +248,7 @@ When you choose a provider in the editor, its default Base URL is filled in:
   - A trailing slash is removed. Addresses with a version path, such as `/api/paas/v4`, work as is.
   - Requests that clients send to the Ark paths (`/gateway/api/v3/`, `/gateway/api/compatible/v1/`) follow the same rules.
   - An upstream has one Base URL. If a provider uses different addresses for different protocols, create separate upstreams. For example, Zhipu uses `https://open.bigmodel.cn/api/paas/v4` for Chat Completions and `https://open.bigmodel.cn/api/v1` for Responses. Ark Coding Plan uses `…/api/coding/v3` for Chat Completions and Responses and `…/api/coding` for Anthropic Messages.
+- **Append protocol endpoint path** is on by default. Turn it off when Base URL is already the complete request endpoint; the gateway then sends every upstream request to that exact URL without adding a protocol path.
 
   The editor previews the final request URL as you type. If an OpenAI or Ark address is missing its path, or an Anthropic address ends in `/v1`, it warns you and offers a one-click fix.
 
@@ -719,6 +720,7 @@ URLs must be HTTP(S) and contain no credentials, query or fragment. Unknown fiel
 | Protocol | `protocol` | | `anthropic` (Anthropic Messages), `chat` (Chat Completions) or `responses` (Responses). |
 | Provider | `vendor` | `generic` | `generic`, `anthropic`, `openai`, `deepseek`, `ark` (Volcano Engine Ark) or `byteplus` (BytePlus ModelArk). Studio offers only the protocols a provider supports; the API accepts any pair. |
 | Base URL | `base_url` | | Provider address; defaults and path rules are in [Upstreams](#upstreams). |
+| Append protocol endpoint path | `append_endpoint_path` | `true` | Appends the selected protocol's path; when false, uses `base_url` as the complete request URL. |
 | Who provides the API key | `auth_mode` | `managed` | `managed` (the gateway holds the API key) or `passthrough` (each client sends its own key). |
 | API key | `api_key` | | Write-only; see [Credentials](#credentials). |
 | Extra headers | `headers` | `{}` | Write-only; see [Credentials](#credentials). |

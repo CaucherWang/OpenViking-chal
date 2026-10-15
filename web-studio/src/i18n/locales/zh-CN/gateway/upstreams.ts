@@ -192,6 +192,11 @@ const upstreams = {
       correctPath: '改用 {{url}}',
       useDefault: '使用默认地址',
     },
+    appendEndpointPath: {
+      label: '拼接协议接口路径',
+      description:
+        '在 Base URL 后拼接所选协议的接口路径。如果 Base URL 已经是完整的请求地址，请关闭此开关。',
+    },
     authMode: {
       label: 'API Key 由谁提供',
       managed: {

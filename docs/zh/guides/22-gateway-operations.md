@@ -248,6 +248,7 @@ ov.example.com {
   - 末尾的斜杠会被去掉。`/api/paas/v4` 这类带版本路径的地址可以直接使用。
   - 客户端用方舟路径（`/gateway/api/v3/`、`/gateway/api/compatible/v1/`）发来的请求，按同样的规则拼接。
   - 一个上游只有一个 Base URL。同一服务商的不同协议地址不同时，要分别建上游：例如智谱 Chat Completions 用 `https://open.bigmodel.cn/api/paas/v4`，Responses 用 `https://open.bigmodel.cn/api/v1`。方舟 Coding Plan 的 Chat Completions 和 Responses 用 `…/api/coding/v3`，Anthropic Messages 用 `…/api/coding`。
+- **拼接协议接口路径**默认开启。如果 Base URL 已经是完整的请求地址，可以关闭它；关闭后，网关的所有上游请求都直接使用该 URL，不再拼接协议路径。
 
   编辑页会实时预览最终的请求地址；OpenAI、方舟这类地址漏掉路径，或者 Anthropic 地址多了 `/v1` 时，会给出提示和一键修正。
 
@@ -719,6 +720,7 @@ URL 必须是 HTTP(S)，不能含凭证、查询参数或 fragment。未知字�
 | 协议 | `protocol` | | `anthropic`（Anthropic Messages）、`chat`（Chat Completions）或 `responses`（Responses）。 |
 | 服务商 | `vendor` | `generic` | `generic`、`anthropic`、`openai`、`deepseek`、`ark`（火山方舟）或 `byteplus`（BytePlus 方舟）。Studio 只提供服务商支持的协议，API 接受任意组合。 |
 | Base URL | `base_url` | | 服务商地址；默认地址和拼接规则见[上游](#上游)。 |
+| 拼接协议接口路径 | `append_endpoint_path` | `true` | 拼接所选协议的接口路径；关闭时把 `base_url` 直接作为完整请求地址。 |
 | API Key 由谁提供 | `auth_mode` | `managed` | `managed`（由网关保管 API Key）或 `passthrough`（每个客户端自带 API Key）。 |
 | API Key | `api_key` | | 只写，见[凭证](#凭证)。 |
 | 额外请求头 | `headers` | `{}` | 只写，见[凭证](#凭证)。 |
