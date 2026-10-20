@@ -77,19 +77,19 @@ MAX_COMPILE_REPAIR_ATTEMPTS = 2
 COMPILER_RULE_STATUSES = frozenset({"active", "archived"})
 
 _RULE_APPLICABILITY_QUESTION = (
-    "Based only on condition, applies_when, and does_not_apply_when, is "
+    "Based only on applies_when and does_not_apply_when, is "
     "candidate_documents[candidate_index] applicable to the current task context? "
     "Judge applicability only; do not judge whether the object passes or fails the Rule."
 )
 _RULE_APPLICABILITY_TRUE_CRITERION = (
-    "The Rule's condition or applies_when is established by the current context, and "
-    "does_not_apply_when is not established. The Rule remains applicable when its requirement "
-    "is satisfied, no violation is found, validation passes, or the outcome is undetermined."
+    "The Rule's applies_when is established by the current context, and does_not_apply_when "
+    "is not established. The Rule remains applicable when its requirement is satisfied, "
+    "no violation is found, validation passes, or the outcome is undetermined."
 )
 _RULE_APPLICABILITY_FALSE_CRITERION = (
-    "The Rule's condition and applies_when are clearly not established, or "
-    "does_not_apply_when is established. Compliance, satisfaction, or absence of a violation "
-    "must not be treated as non-applicability."
+    "The Rule's applies_when is clearly not established, or does_not_apply_when is established. "
+    "Compliance, satisfaction, or absence of a violation must not be treated as "
+    "non-applicability."
 )
 
 
@@ -288,7 +288,6 @@ class RuleRecord(BaseModel):
 
     name: str = Field(min_length=1, max_length=128)
     description: str = Field(min_length=1, max_length=2_000)
-    condition: str = Field(default="", max_length=4_000)
     confidence: Literal["user", "high", "medium", "low"] = "user"
     content: str = Field(min_length=1, max_length=16_000)
     applies_when: str = Field(default="", max_length=4_000)
@@ -415,7 +414,7 @@ situation being evaluated.
 Application protocol:
 1. Evaluate every Rule independently against concrete facts from the current task.
 2. Topic similarity alone does not make a Rule applicable.
-3. Check the condition, applicability boundary, and exception before applying a Rule.
+3. Check the applicability boundary and exception before applying a Rule.
 4. Apply the minimum sufficient set of Rules, and do not infer facts that are absent.
 5. Before acting or answering, validate the planned action or answer against every
    returned Rule. Returned Rules are mandatory when their applicability conditions hold."""
@@ -434,7 +433,6 @@ def _render_rule_block(rule: StoredRule) -> str:
         "Constraint:",
         record.content.strip(),
         "",
-        f"Condition: {record.condition.strip() or '(none specified)'}",
         f"Applies when: {record.applies_when.strip() or '(none specified)'}",
         f"Does not apply when: {record.does_not_apply_when.strip() or '(none specified)'}",
     ]
@@ -452,6 +450,20 @@ def _render_rule_block(rule: StoredRule) -> str:
             ]
         )
     return "\n".join(lines)
+
+
+def _render_rule_for_judge(rule: StoredRule) -> str:
+    record = rule.record
+    body = strip_memory_fields_trailer(record.body).strip()
+    parts = [
+        f"Rule ID: {rule.atomic_id}",
+        f"Constraint: {record.content.strip()}",
+        f"Applies when: {record.applies_when.strip() or '(none specified)'}",
+        f"Does not apply when: {record.does_not_apply_when.strip() or '(none specified)'}",
+    ]
+    if body:
+        parts.extend(["Additional guidance:", body])
+    return "\n".join(parts)[:MAX_RULE_CHARS_FOR_JUDGE]
 
 
 def _render_rules(selected: list[tuple[StoredRule, float]]) -> str:
@@ -783,9 +795,8 @@ class RuleService:
             stripped = value.strip()
             return "" if stripped.casefold() in {"", "none", "(none)", "[]", "[ ]"} else stripped
 
-        def applicability(record: RuleRecord) -> tuple[str, str, str]:
+        def applicability(record: RuleRecord) -> tuple[str, str]:
             return (
-                record.condition.strip(),
                 record.applies_when.strip(),
                 meaningful_exception(record.does_not_apply_when),
             )
@@ -1761,7 +1772,7 @@ meaning are more important than brevity.
   the target is deleted and a new atomic_id is created.
 - NEW only for a genuinely independent Rule. Before choosing NEW, internally compare it
   with the nearest supplied active or archived Rule and verify the behavioral difference.
-  Do not emit comparison metadata. If the nearest Rule has the same obligation and differs
+  Do not emit comparison metadata. If the nearest Rule has the same obligation differs
   only in trigger or wording, NEW is invalid: use UPDATE, or NOOP only when that Rule is
   active.
 - UNCERTAIN only when the supplied material and existing Rules cannot resolve an
@@ -1783,9 +1794,9 @@ meaning are more important than brevity.
   table cell establishes the obligation. Include the relevant heading or table labels
   together with the normative text when they determine its meaning.
 - NEW and REPLACE applicability must have `applicability_evidence`: an exact source
-  quotation supporting every non-empty condition, applies_when, or meaningful exception.
+  quotation supporting every non-empty applies_when or meaningful exception.
 - UPDATE may use `applicability_evidence` value `existing:<primary_atomic_id>` only when
-  condition, applies_when, and does_not_apply_when are preserved exactly from that Rule.
+  applies_when and does_not_apply_when are preserved exactly from that Rule.
   Any changed applicability requires an exact quotation from the new material.
 - Every UPDATE must include `carried_over.existing_requirements`, listing the old
   requirements, triggers, timing anchors, and exceptions considered. Put a requirement
@@ -1808,7 +1819,6 @@ Return JSON only with this shape:
     "record": null or {{
       "name": "short-slug",
       "description": "complete one-line summary",
-      "condition": "",
       "confidence": "user",
       "content": "complete actionable constraint",
       "applies_when": "decidable trigger",
@@ -2147,7 +2157,7 @@ existing_rules:
                         scores = await asyncio.to_thread(
                             client.rerank_batch,
                             task_context,
-                            [rule.content[:MAX_RULE_CHARS_FOR_JUDGE] for rule in rules],
+                            [_render_rule_for_judge(rule) for rule in rules],
                         )
                     finally:
                         client.close()
@@ -2205,12 +2215,12 @@ existing_rules:
             for index, rule in enumerate(rules)
         ]
         prompt = f"""
-Evaluate only whether each saved Rule applies to the current task. Consider condition,
-applies_when, and does_not_apply_when. Topic similarity is not sufficient.
+Evaluate only whether each saved Rule applies to the current task. Consider applies_when
+and does_not_apply_when. Topic similarity is not sufficient.
 
 Applicability is independent of the compliance outcome:
-- A Rule is applicable when its condition or applies_when is established and
-  does_not_apply_when is not established.
+- A Rule is applicable when its applies_when is established and does_not_apply_when is
+  not established.
 - Do not judge whether the object passes or fails the Rule.
 - Do not lower applicability because the requirement is satisfied, validation passes,
   no violation is found, or the outcome is undetermined.

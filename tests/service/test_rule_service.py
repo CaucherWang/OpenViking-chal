@@ -60,7 +60,7 @@ def test_rule_record_is_an_implicit_user_constraint():
     dumped = record.model_dump()
 
     assert record.confidence == "user"
-    assert {"type", "domain", "scope", "scope_anchor"}.isdisjoint(dumped)
+    assert {"type", "domain", "scope", "scope_anchor", "condition"}.isdisjoint(dumped)
     assert record.content == "Ask for confirmation before deleting files."
     assert "rule_text" not in dumped
     assert RuleRecord.model_validate({**dumped, "confidence": "high"}).confidence == "high"
@@ -77,6 +77,7 @@ def test_compile_prompt_does_not_expose_memory_preference_fields():
 
     assert '"confidence": "user"' in prompt
     assert '"content": "complete actionable constraint"' in prompt
+    assert '"condition":' not in prompt
     assert '"rule_text":' not in prompt
     assert '"type": "preference' not in prompt
     assert '"domain":' not in prompt
@@ -173,6 +174,7 @@ async def test_load_rule_accepts_legacy_rule_text_frontmatter():
 
     assert rule.record.content == "Confirm before deleting files."
     assert rule.record.confidence == "high"
+    assert "condition" not in rule.record.model_dump()
 
 
 @pytest.mark.asyncio
@@ -343,13 +345,25 @@ def test_compiler_prompt_limit_uses_context_metadata(rules_config, vlm, expected
 
 @pytest.mark.asyncio
 async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
+    rules = [
+        _stored_rule("rule-a").model_copy(
+            update={"content": "---\ncondition: legacy hidden value\n---\n"}
+        ),
+        _stored_rule("rule-b"),
+    ]
+
     class _JevClient:
         def __init__(self):
             self.closed = False
 
         def rerank_batch(self, query, documents):
             assert query == "delete generated files"
-            assert documents == ["rule a", "rule b"]
+            assert len(documents) == 2
+            assert "Rule ID: rule-a" in documents[0]
+            assert "Applies when:" in documents[0]
+            assert "Does not apply when:" in documents[0]
+            assert "legacy hidden value" not in documents[0]
+            assert "Condition:" not in documents[0]
             return [0.9, 0.2]
 
         def close(self):
@@ -377,7 +391,7 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
 
     scores, backend, warning = await service._score_rules(
         "delete generated files",
-        [SimpleNamespace(content="rule a"), SimpleNamespace(content="rule b")],
+        rules,
         _ctx(),
     )
 
@@ -424,7 +438,7 @@ async def test_jev_rule_matcher_failure_falls_back_to_vlm(monkeypatch):
 
     scores, backend, warning = await service._score_rules(
         "delete generated files",
-        [SimpleNamespace(content="rule a")],
+        [_stored_rule("rule-a")],
         _ctx(),
     )
 
@@ -467,6 +481,8 @@ async def test_vlm_rule_matcher_judges_applicability_not_compliance(monkeypatch)
     assert scores == [0.9]
     prompt = vlm.get_completion_async.await_args.kwargs["prompt"]
     assert "Evaluate only whether each saved Rule applies" in prompt
+    assert "Consider applies_when" in prompt
+    assert '"condition":' not in prompt
     assert "Do not judge whether the object passes or fails the Rule" in prompt
     assert "no violation is found" in prompt
     assert "remains applicable" in prompt
@@ -927,6 +943,7 @@ async def test_search_returns_only_rules_above_independent_probability_threshold
     assert result["rules"][0]["content"] == "complete rule a"
     assert "[a@1]" in result["rendered"]
     assert "Ask for confirmation before deleting files." in result["rendered"]
+    assert "Condition:" not in result["rendered"]
     assert "Rules are behavioral constraints" in result["rendered"]
     assert result["delivery"] == {
         "complete": True,
