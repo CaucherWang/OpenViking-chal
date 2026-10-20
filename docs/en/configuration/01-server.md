@@ -33,6 +33,7 @@ This outline shows common top-level groups, not a runnable configuration. For a 
   "vlm": {},
   "query_planner": {},
   "rerank": {},
+  "rules": {},
   "retrieval": {},
   "storage": {},
   "server": {},
@@ -56,6 +57,7 @@ Optional sections use their defaults when omitted. Unknown fields in `ov.conf` a
 | `vlm` | object | empty config | Content understanding, summaries, and memory extraction; configure a working model before using these capabilities |
 | `query_planner` | object / `null` | `null` | Model for retrieval intent analysis and recall rewriting. Falls back to `vlm` when omitted or empty; recall rewrite in `auto` mode requires a configured cluster `query_planner` or an account-level `query_planner` or `vlm` override |
 | `rerank` | object | disabled | Retrieval result reranking |
+| `rules` | object | empty config | Optional dedicated models for rule compilation and applicability matching |
 | `retrieval` | object | see below | Ranking and intent-analysis behavior |
 | `grep` | object | built-in defaults | Text search engine |
 | `glob` | object | built-in defaults | Path glob engine |
@@ -146,6 +148,46 @@ API-based `embedding`, `vlm`, `query_planner`, and `rerank` configurations reuse
 | `encoding_format` | `"float"` / `"base64"` | OpenAI-compatible vector encoding |
 
 Changing the model or `dimension` can make existing vector collections incompatible and may require migration or reindexing.
+
+### `rules`
+
+Optional models and lifecycle settings for compiled Rules:
+
+```json
+{
+  "rules": {
+    "jev_rule_matcher": {
+      "provider": "jev",
+      "model": "jev-latest",
+      "mode": "noul"
+    },
+    "rule_matcher": {
+      "provider": "openai",
+      "model": "gpt-4o-mini"
+    },
+    "compiler": {
+      "provider": "openai",
+      "model": "gpt-4o"
+    },
+    "compiler_context_window": 0
+  }
+}
+```
+
+| Field | Type / values | Default | Purpose |
+|---|---|---|---|
+| `jev_rule_matcher` | rerank config / `null` | `null` | Jev Noul matcher for Case filtering and Rule applicability |
+| `rule_matcher` | VLM config / `null` | `null` | VLM fallback for Rule applicability |
+| `compiler` | VLM config / `null` | `null` | Dedicated Rule compiler |
+| `compiler_context_window` | `0` or integer `>= 2048` | `0` | Compiler context window; `0` auto-detects with a conservative fallback |
+| `case_irrelevance_threshold` | number, `0.5`-`1.0` | `0.9` | Skip a Case only at or above this irrelevance probability |
+| `deleted_retention_days` | integer, `>= 1` | `30` | Days before deleted Rules are permanently removed |
+| `deleted_cleanup_interval_seconds` | integer, `>= 60` | `2592000` | Deleted-Rule cleanup interval |
+| `deleted_cleanup_enabled` | boolean | `true` | Enable periodic deleted-Rule cleanup |
+
+`jev_rule_matcher` must use provider `jev` in `noul` mode. Applicability matching
+falls back from Jev to `rule_matcher`, then to the account VLM; compilation falls
+back from `compiler` to the account VLM.
 
 ### `rerank`
 

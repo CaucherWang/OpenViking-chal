@@ -86,6 +86,7 @@ from .parser_config import (
 from .prompts_config import PromptsConfig
 from .rerank_config import RerankConfig
 from .retrieval_config import RetrievalConfig
+from .rules_config import RulesConfig
 from .storage_config import StorageConfig
 from .telemetry_config import TelemetryConfig, TracerConfig
 from .vectordb_config import OpenGaussConfig, VectorDBBackendConfig
@@ -147,6 +148,7 @@ __all__ = [
     "GrepEngine",
     "RerankConfig",
     "RetrievalConfig",
+    "RulesConfig",
     "ExpiryConfig",
     "ExpiryRedisConfig",
     "StorageConfig",

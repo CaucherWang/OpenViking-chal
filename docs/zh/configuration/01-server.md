@@ -33,6 +33,7 @@ openviking-server --config /path/to/ov.conf
   "vlm": {},
   "query_planner": {},
   "rerank": {},
+  "rules": {},
   "retrieval": {},
   "storage": {},
   "server": {},
@@ -56,6 +57,7 @@ openviking-server --config /path/to/ov.conf
 | `vlm` | object | 空配置 | 内容理解、摘要和记忆抽取使用的模型；使用相关能力前需要配置可用模型 |
 | `query_planner` | object / `null` | `null` | 检索意图分析和召回改写使用的模型。未配置或为空时回退到 `vlm`；`auto` 模式的召回改写要求配置集群级 `query_planner`，或账户级 `query_planner` / `vlm` 覆盖项 |
 | `rerank` | object | disabled | 检索结果重排模型 |
+| `rules` | object | 空配置 | 规则编译和适用性判断使用的可选专用模型 |
 | `retrieval` | object | 见下表 | 检索排序和意图分析策略 |
 | `grep` | object | 内置默认值 | 文本搜索引擎配置 |
 | `glob` | object | 内置默认值 | 路径模式匹配引擎配置 |
@@ -146,6 +148,45 @@ API 型 `embedding`、`vlm`、`query_planner` 和 `rerank` 配置会复用部分
 | `encoding_format` | `"float"` / `"base64"` | OpenAI 兼容接口的向量编码格式 |
 
 更换模型或 `dimension` 可能与已有向量集合不兼容，需要迁移或重建索引。
+
+### `rules`
+
+Compiled Rule 的可选模型与生命周期配置：
+
+```json
+{
+  "rules": {
+    "jev_rule_matcher": {
+      "provider": "jev",
+      "model": "jev-latest",
+      "mode": "noul"
+    },
+    "rule_matcher": {
+      "provider": "openai",
+      "model": "gpt-4o-mini"
+    },
+    "compiler": {
+      "provider": "openai",
+      "model": "gpt-4o"
+    },
+    "compiler_context_window": 0
+  }
+}
+```
+
+| 字段 | 类型 / 可选值 | 默认值 | 作用 |
+|---|---|---|---|
+| `jev_rule_matcher` | rerank 配置 / `null` | `null` | Case 过滤和 Rule 适用性判断使用的 Jev Noul 模型 |
+| `rule_matcher` | VLM 配置 / `null` | `null` | Rule 适用性判断的 VLM 回退模型 |
+| `compiler` | VLM 配置 / `null` | `null` | 专用 Rule Compiler |
+| `compiler_context_window` | `0` 或 integer `>= 2048` | `0` | Compiler 上下文窗口；`0` 表示自动探测并使用保守回退值 |
+| `case_irrelevance_threshold` | number，`0.5`-`1.0` | `0.9` | Case 无关概率达到该值时跳过 |
+| `deleted_retention_days` | integer，`>= 1` | `30` | deleted Rule 的物理删除保留天数 |
+| `deleted_cleanup_interval_seconds` | integer，`>= 60` | `2592000` | deleted Rule 清理周期 |
+| `deleted_cleanup_enabled` | boolean | `true` | 是否定期清理 deleted Rule |
+
+`jev_rule_matcher` 必须使用 `jev` provider 和 `noul` 模式。适用性判断依次回退到
+`rule_matcher` 和账户默认 VLM；规则编译从 `compiler` 回退到账户默认 VLM。
 
 ### `rerank`
 
