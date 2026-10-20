@@ -14,6 +14,7 @@ from vikingbot.agent.tools.ov_file import (
     VikingListTool,
     VikingMemoryCommitTool,
     VikingMultiReadTool,
+    VikingRuleSearchTool,
     VikingSearchTool,
 )
 from vikingbot.agent.tools.registry import ToolRegistry
@@ -103,6 +104,7 @@ def register_default_tools(
         registry.register(VikingGlobTool(config=config))
         registry.register(VikingExportTool(config=config))
         registry.register(VikingMemoryCommitTool(config=config))
+        registry.register(VikingRuleSearchTool(config=config))
         if not config.read_only:
             registry.register(VikingAddResourceTool(config=config))
 
