@@ -9,7 +9,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
@@ -76,20 +76,29 @@ DEFAULT_DELETED_RETENTION_DAYS = 30
 MAX_COMPILE_REPAIR_ATTEMPTS = 2
 COMPILER_RULE_STATUSES = frozenset({"active", "archived"})
 
-_RULE_APPLICABILITY_QUESTION = (
-    "Based only on applies_when and does_not_apply_when, is "
-    "candidate_documents[candidate_index] applicable to the current task context? "
-    "Judge applicability only; do not judge whether the object passes or fails the Rule."
+_RULE_APPLIES_WHEN_QUESTION = (
+    "Is the applies_when clause in candidate_documents[candidate_index] established by "
+    "concrete facts in the current task context in query? Judge only whether the clause "
+    "holds; do not judge whether the object passes or fails the Rule."
 )
-_RULE_APPLICABILITY_TRUE_CRITERION = (
-    "The Rule's applies_when is established by the current context, and does_not_apply_when "
-    "is not established. The Rule remains applicable when its requirement is satisfied, "
-    "no violation is found, validation passes, or the outcome is undetermined."
+_RULE_APPLIES_WHEN_TRUE_CRITERION = (
+    "The current task context provides concrete facts satisfying the entire applies_when clause."
 )
-_RULE_APPLICABILITY_FALSE_CRITERION = (
-    "The Rule's applies_when is clearly not established, or does_not_apply_when is established. "
-    "Compliance, satisfaction, or absence of a violation must not be treated as "
-    "non-applicability."
+_RULE_APPLIES_WHEN_FALSE_CRITERION = (
+    "The current task context contradicts, does not establish, or leaves a material part of "
+    "the applies_when clause unknown. Compliance outcome is irrelevant."
+)
+_RULE_EXCEPTION_QUESTION = (
+    "Is the does_not_apply_when clause in candidate_documents[candidate_index] established by "
+    "concrete facts in the current task context in query? Judge only whether the exception holds."
+)
+_RULE_EXCEPTION_TRUE_CRITERION = (
+    "The current task context provides concrete facts satisfying the entire "
+    "does_not_apply_when clause."
+)
+_RULE_EXCEPTION_FALSE_CRITERION = (
+    "The current task context contradicts, does not establish, or leaves a material part of "
+    "the does_not_apply_when clause unknown."
 )
 
 
@@ -452,18 +461,24 @@ def _render_rule_block(rule: StoredRule) -> str:
     return "\n".join(lines)
 
 
-def _render_rule_for_judge(rule: StoredRule) -> str:
-    record = rule.record
-    body = strip_memory_fields_trailer(record.body).strip()
-    parts = [
-        f"Rule ID: {rule.atomic_id}",
-        f"Constraint: {record.content.strip()}",
-        f"Applies when: {record.applies_when.strip() or '(none specified)'}",
-        f"Does not apply when: {record.does_not_apply_when.strip() or '(none specified)'}",
-    ]
-    if body:
-        parts.extend(["Additional guidance:", body])
-    return "\n".join(parts)[:MAX_RULE_CHARS_FOR_JUDGE]
+def _meaningful_applicability_clause(value: str) -> str:
+    stripped = value.strip()
+    return "" if stripped.casefold() in {"", "none", "(none)", "[]", "[ ]"} else stripped
+
+
+def _render_applies_when_for_judge(rule: StoredRule) -> str:
+    return (
+        f"Rule ID: {rule.atomic_id}\n"
+        f"applies_when: {_meaningful_applicability_clause(rule.record.applies_when)}"
+    )[:MAX_RULE_CHARS_FOR_JUDGE]
+
+
+def _render_exception_for_judge(rule: StoredRule) -> str:
+    return (
+        f"Rule ID: {rule.atomic_id}\n"
+        "does_not_apply_when: "
+        f"{_meaningful_applicability_clause(rule.record.does_not_apply_when)}"
+    )[:MAX_RULE_CHARS_FOR_JUDGE]
 
 
 def _render_rules(selected: list[tuple[StoredRule, float]]) -> str:
@@ -2130,6 +2145,96 @@ existing_rules:
             result["_writes"] = writes
         return result
 
+    async def _score_rules_with_jev(
+        self,
+        task_context: str,
+        rules: list[StoredRule],
+        config: Any,
+    ) -> list[float]:
+        applies_scores = [1.0] * len(rules)
+        exception_scores = [0.0] * len(rules)
+
+        async def judge(
+            indices: list[int],
+            *,
+            question: str,
+            true_criterion: str,
+            false_criterion: str,
+            render: Callable[[StoredRule], str],
+        ) -> tuple[list[int], list[float]]:
+            client = create_rule_jev_judge(
+                config,
+                question=question,
+                true_criterion=true_criterion,
+                false_criterion=false_criterion,
+            )
+            if client is None:
+                raise RuntimeError("Jev Noul judge is unavailable")
+            try:
+                scores = await asyncio.to_thread(
+                    client.rerank_batch,
+                    task_context,
+                    [render(rules[index]) for index in indices],
+                )
+            finally:
+                client.close()
+            if scores is None or len(scores) != len(indices):
+                raise ValueError("Jev Noul returned incomplete Rule scores")
+            return indices, scores
+
+        applies_indices = [
+            index
+            for index, rule in enumerate(rules)
+            if _meaningful_applicability_clause(rule.record.applies_when)
+        ]
+        exception_indices = [
+            index
+            for index, rule in enumerate(rules)
+            if _meaningful_applicability_clause(rule.record.does_not_apply_when)
+        ]
+        jobs = []
+        kinds = []
+        if applies_indices:
+            kinds.append("applies_when")
+            jobs.append(
+                judge(
+                    applies_indices,
+                    question=_RULE_APPLIES_WHEN_QUESTION,
+                    true_criterion=_RULE_APPLIES_WHEN_TRUE_CRITERION,
+                    false_criterion=_RULE_APPLIES_WHEN_FALSE_CRITERION,
+                    render=_render_applies_when_for_judge,
+                )
+            )
+        if exception_indices:
+            kinds.append("does_not_apply_when")
+            jobs.append(
+                judge(
+                    exception_indices,
+                    question=_RULE_EXCEPTION_QUESTION,
+                    true_criterion=_RULE_EXCEPTION_TRUE_CRITERION,
+                    false_criterion=_RULE_EXCEPTION_FALSE_CRITERION,
+                    render=_render_exception_for_judge,
+                )
+            )
+
+        for kind, (indices, scores) in zip(
+            kinds,
+            await asyncio.gather(*jobs),
+            strict=True,
+        ):
+            destination = applies_scores if kind == "applies_when" else exception_scores
+            for index, score in zip(indices, scores, strict=True):
+                destination[index] = score
+
+        return [
+            min(applies_score, 1.0 - exception_score)
+            for applies_score, exception_score in zip(
+                applies_scores,
+                exception_scores,
+                strict=True,
+            )
+        ]
+
     async def _score_rules(
         self,
         task_context: str,
@@ -2145,28 +2250,13 @@ existing_rules:
             and getattr(config, "mode", None) == "noul"
             and config.is_available()
         ):
-            client = create_rule_jev_judge(
-                config,
-                question=_RULE_APPLICABILITY_QUESTION,
-                true_criterion=_RULE_APPLICABILITY_TRUE_CRITERION,
-                false_criterion=_RULE_APPLICABILITY_FALSE_CRITERION,
-            )
-            if client is not None:
-                try:
-                    try:
-                        scores = await asyncio.to_thread(
-                            client.rerank_batch,
-                            task_context,
-                            [_render_rule_for_judge(rule) for rule in rules],
-                        )
-                    finally:
-                        client.close()
-                except Exception as exc:  # noqa: BLE001 - fall back to the configured VLM
-                    logger.warning("Jev rule matcher unavailable: %s", exc)
-                else:
-                    if scores is not None and len(scores) == len(rules):
-                        return scores, "jev_noul", None
+            try:
+                scores = await self._score_rules_with_jev(task_context, rules, config)
+            except Exception as exc:  # noqa: BLE001 - fall back to the configured VLM
+                logger.warning("Jev rule matcher unavailable: %s", exc)
                 jev_warning = "Jev Noul was unavailable; VLM fallback was used."
+            else:
+                return scores, "jev_noul", None
 
         try:
             scores = await self._score_rules_with_vlm(task_context, rules, ctx)

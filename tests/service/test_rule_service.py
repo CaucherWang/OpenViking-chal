@@ -350,27 +350,52 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
             update={"content": "---\ncondition: legacy hidden value\n---\n"}
         ),
         _stored_rule("rule-b"),
+        _stored_rule("unconditional").model_copy(
+            update={
+                "record": _record("unconditional").model_copy(
+                    update={"applies_when": "", "does_not_apply_when": "(none)"}
+                )
+            }
+        ),
     ]
 
     class _JevClient:
-        def __init__(self):
+        def __init__(self, kind):
+            self.kind = kind
             self.closed = False
 
         def rerank_batch(self, query, documents):
             assert query == "delete generated files"
             assert len(documents) == 2
             assert "Rule ID: rule-a" in documents[0]
-            assert "Applies when:" in documents[0]
-            assert "Does not apply when:" in documents[0]
             assert "legacy hidden value" not in documents[0]
             assert "Condition:" not in documents[0]
-            return [0.9, 0.2]
+            assert "Constraint:" not in documents[0]
+            if self.kind == "applies_when":
+                assert all("applies_when:" in document for document in documents)
+                assert all("does_not_apply_when:" not in document for document in documents)
+                return [0.9, 0.8]
+            assert all("does_not_apply_when:" in document for document in documents)
+            assert all(
+                not document.splitlines()[-1].startswith("applies_when:") for document in documents
+            )
+            return [0.1, 0.7]
 
         def close(self):
             self.closed = True
 
-    client = _JevClient()
-    judge_config = {}
+    clients = []
+    judge_configs = []
+
+    def create_judge(config, **kwargs):
+        kind = (
+            "does_not_apply_when" if "does_not_apply_when" in kwargs["question"] else "applies_when"
+        )
+        client = _JevClient(kind)
+        clients.append(client)
+        judge_configs.append(kwargs)
+        return client
+
     service = RuleService()
     service.set_dependencies(
         fs=SimpleNamespace(),
@@ -386,7 +411,7 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
     monkeypatch.setattr(service, "_score_rules_with_vlm", vlm_score)
     monkeypatch.setattr(
         "openviking.service.rule_service.create_rule_jev_judge",
-        lambda config, **kwargs: judge_config.update(kwargs) or client,
+        create_judge,
     )
 
     scores, backend, warning = await service._score_rules(
@@ -395,13 +420,15 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
         _ctx(),
     )
 
-    assert scores == [0.9, 0.2]
+    assert scores == pytest.approx([0.9, 0.3, 1.0])
     assert backend == "jev_noul"
     assert warning is None
-    assert client.closed is True
-    assert "Judge applicability only" in judge_config["question"]
-    assert "remains applicable when its requirement is satisfied" in judge_config["true_criterion"]
-    assert "must not be treated as non-applicability" in judge_config["false_criterion"]
+    assert len(clients) == 2
+    assert all(client.closed for client in clients)
+    assert "applies_when clause" in judge_configs[0]["question"]
+    assert "does_not_apply_when clause" in judge_configs[1]["question"]
+    assert "entire applies_when clause" in judge_configs[0]["true_criterion"]
+    assert "entire does_not_apply_when clause" in judge_configs[1]["true_criterion"]
     vlm_score.assert_not_awaited()
 
 
@@ -438,7 +465,11 @@ async def test_jev_rule_matcher_failure_falls_back_to_vlm(monkeypatch):
 
     scores, backend, warning = await service._score_rules(
         "delete generated files",
-        [_stored_rule("rule-a")],
+        [
+            _stored_rule("rule-a").model_copy(
+                update={"record": _record("rule-a").model_copy(update={"does_not_apply_when": ""})}
+            )
+        ],
         _ctx(),
     )
 
