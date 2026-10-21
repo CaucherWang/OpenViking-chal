@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from openviking.service.rule_jev import (
     RuleJevClient,
     RuleJevInput,
@@ -7,6 +9,17 @@ from openviking.service.rule_jev import (
     create_rule_jev_judge,
 )
 from openviking_cli.utils.config.rerank_config import RerankConfig
+
+
+@pytest.mark.parametrize("applies_when", ["", " ", "none", "(none)", "[]"])
+def test_rule_jev_input_requires_applies_when(applies_when):
+    with pytest.raises(ValueError, match="requires applies_when"):
+        RuleJevInput(
+            name="Protect production configuration",
+            content="Obtain approval before changing production configuration.",
+            applies_when=applies_when,
+            exception="",
+        )
 
 
 @patch("openviking.models.rerank.jev_rerank.httpx.Client")
@@ -135,4 +148,29 @@ def test_rule_jev_rejects_missing_expected_answer(mock_client_class):
         )
         is None
     )
+    client.close()
+
+
+@patch("openviking.service.rule_jev.httpx.Client")
+def test_rule_jev_omits_empty_exception_question(mock_client_class):
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"answers": {"applies_when_0": {"type": "noul", "noul": 0.84}}}
+    mock_client_class.return_value.post.return_value = response
+    client = RuleJevClient.from_config(RerankConfig(provider="jev", api_key="key", mode="noul"))
+
+    assert client is not None
+    assert client.judge_rules(
+        "Deploy production configuration.",
+        [
+            RuleJevInput(
+                name="Protect production configuration",
+                content="Obtain approval before changing production configuration.",
+                applies_when="The task changes production configuration.",
+                exception="",
+            )
+        ],
+    ) == [RuleJevScore(applies_when=0.84, exception=0.0)]
+    questions = mock_client_class.return_value.post.call_args.kwargs["json"]["questions"]
+    assert set(questions) == {"applies_when_0"}
     client.close()

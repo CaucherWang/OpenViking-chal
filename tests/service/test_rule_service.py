@@ -74,6 +74,12 @@ def test_rule_record_is_an_implicit_user_constraint():
     assert RuleRecord.model_validate({**dumped, "confidence": "high"}).confidence == "high"
 
 
+@pytest.mark.parametrize("applies_when", ["", " ", "none", "(none)", "[]"])
+def test_rule_record_requires_concrete_applies_when(applies_when):
+    with pytest.raises(ValueError, match="applies_when"):
+        RuleRecord.model_validate({**_record().model_dump(), "applies_when": applies_when})
+
+
 def test_compile_prompt_does_not_expose_memory_preference_fields():
     removed_comparison_field = "_".join(("nearest", "existing"))
     prompt = RuleService._render_compile_prompt(
@@ -85,7 +91,7 @@ def test_compile_prompt_does_not_expose_memory_preference_fields():
 
     assert '"confidence": "user"' in prompt
     assert '"content": "complete actionable constraint"' in prompt
-    assert '"exception": "explicit exceptions or (none)"' in prompt
+    assert '"exception": "explicit exceptions or empty"' in prompt
     assert '"condition":' not in prompt
     assert '"rule_text":' not in prompt
     assert '"type": "preference' not in prompt
@@ -184,6 +190,37 @@ async def test_load_rule_accepts_legacy_rule_text_frontmatter():
     assert rule.record.confidence == "high"
     assert rule.record.exception == ""
     assert "condition" not in rule.record.model_dump()
+
+
+@pytest.mark.asyncio
+async def test_load_rule_rejects_missing_applies_when():
+    uri = "viking://user/alice/memories/rules/items/invalid.md"
+    metadata = {
+        "schema": RULE_SCHEMA,
+        "atomic_id": "invalid",
+        "revision": 1,
+        "status": "active",
+        "case_id": "file-operations",
+        "source_uris": [],
+        "evidence": [],
+        "updated_at": "",
+        "name": "invalid",
+        "description": "Invalid rule without applicability.",
+        "confidence": "high",
+        "content": "Confirm before deleting files.",
+    }
+    markdown = f"---\n{yaml.safe_dump(metadata, sort_keys=False)}---\n"
+    service = RuleService()
+    service.set_dependencies(
+        fs=SimpleNamespace(read=AsyncMock(return_value=markdown)),
+        resources=SimpleNamespace(),
+        search=SimpleNamespace(),
+        vlm_resolver=SimpleNamespace(),
+        rules_config=None,
+    )
+
+    with pytest.raises(ValueError, match="applies_when"):
+        await service._load_rule(uri, _ctx())
 
 
 @pytest.mark.asyncio
@@ -360,12 +397,8 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
         ),
         _stored_rule("rule-b"),
         _stored_rule("rule-c"),
-        _stored_rule("unconditional").model_copy(
-            update={
-                "record": _record("unconditional").model_copy(
-                    update={"applies_when": "", "exception": "(none)"}
-                )
-            }
+        _stored_rule("no-exception").model_copy(
+            update={"record": _record("no-exception").model_copy(update={"exception": "(none)"})}
         ),
     ]
 
@@ -385,13 +418,13 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
             assert inputs[0].exception == (
                 "when the user already explicitly confirmed this deletion"
             )
-            assert inputs[3].applies_when == ""
+            assert inputs[3].applies_when == "when a task requires deleting files"
             assert inputs[3].exception == ""
             return [
                 RuleJevScore(applies_when=0.9, exception=0.1),
                 RuleJevScore(applies_when=0.8, exception=0.7),
                 RuleJevScore(applies_when=0.6, exception=0.8),
-                RuleJevScore(applies_when=1.0, exception=0.0),
+                RuleJevScore(applies_when=0.95, exception=0.0),
             ]
 
         def close(self):
@@ -423,7 +456,7 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
         _ctx(),
     )
 
-    assert scores == pytest.approx([0.9, 0.8, 0.0, 1.0])
+    assert scores == pytest.approx([0.9, 0.8, 0.0, 0.95])
     assert backend == "jev_noul"
     assert warning is None
     assert client.closed is True
@@ -1166,6 +1199,16 @@ def test_rule_renderer_keeps_an_oversized_rule_complete():
 
     assert content.strip() in rendered
     assert len(rendered) > 1_000
+
+
+def test_rule_renderer_omits_empty_exception():
+    record = _record("no-exception").model_copy(update={"exception": ""})
+    rule = _stored_rule("no-exception").model_copy(update={"record": record})
+
+    rendered = _render_rules([(rule, 0.99)])
+
+    assert "Applies when: when a task requires deleting files" in rendered
+    assert "Exception:" not in rendered
 
 
 @pytest.mark.asyncio

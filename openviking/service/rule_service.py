@@ -14,7 +14,7 @@ from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from openviking.core.namespace import classify_uri
 from openviking.core.uri_validation import validate_request_viking_uri
@@ -277,9 +277,17 @@ class RuleRecord(BaseModel):
     description: str = Field(min_length=1, max_length=2_000)
     confidence: Literal["user", "high", "medium", "low"] = "user"
     content: str = Field(min_length=1, max_length=16_000)
-    applies_when: str = Field(default="", max_length=4_000)
+    applies_when: str = Field(min_length=1, max_length=4_000)
     exception: str = Field(default="", max_length=4_000)
     body: str = Field(default="", max_length=32_000)
+
+    @field_validator("applies_when")
+    @classmethod
+    def validate_applies_when(cls, value: str) -> str:
+        normalized = value.strip()
+        if normalized.casefold() in {"", "none", "(none)", "[]", "[ ]"}:
+            raise ValueError("applies_when must define a concrete applicability condition")
+        return normalized
 
 
 class RuleCaseRef(BaseModel):
@@ -420,9 +428,11 @@ def _render_rule_block(rule: StoredRule) -> str:
         "Constraint:",
         record.content.strip(),
         "",
-        f"Applies when: {record.applies_when.strip() or '(none specified)'}",
-        f"Exception: {record.exception.strip() or '(none specified)'}",
+        f"Applies when: {record.applies_when.strip()}",
     ]
+    exception = _meaningful_applicability_clause(record.exception)
+    if exception:
+        lines.append(f"Exception: {exception}")
     description = record.description.strip()
     if description and description != record.content.strip():
         lines.extend(["", f"Summary: {description}"])
@@ -449,11 +459,7 @@ def _render_rules(selected: list[tuple[StoredRule, float]]) -> str:
     header = f"{_RULE_APPLICATION_GUIDANCE}\n\nMatched {total} active Rule(s)."
 
     if not selected:
-        return (
-            f"{header}\n\n"
-            "No active compiled Rule met the current retrieval thresholds. This does not "
-            "prove that no relevant source policy or task fact exists."
-        )
+        return f"{header}\n\nNo active compiled Rule met the current retrieval thresholds."
     return "\n\n".join([header, *(_render_rule_block(rule) for rule, _ in selected)])
 
 
@@ -1707,9 +1713,9 @@ meaning are more important than brevity.
   faithful one-line summary, not a weaker substitute. `body` may explain application
   but must not contradict or silently broaden `content`.
 - `applies_when` must describe an objectively decidable situation in which the Rule is
-  selected. It must not merely restate the obligation or refer to an internal future
-  reasoning step. `exception` lists only genuine exceptions. Use "(none)"
-  when the source states no exception rather than inventing one.
+  selected and must never be empty. It must not merely restate the obligation or refer
+  to an internal future reasoning step. `exception` lists only genuine exceptions; leave
+  it empty when the source states no exception rather than inventing one.
 
 3. Atomic policy units
 - Return one top-level mutation per independently changeable or revocable policy.
@@ -1801,7 +1807,7 @@ Return JSON only with this shape:
       "confidence": "user",
       "content": "complete actionable constraint",
       "applies_when": "decidable trigger",
-      "exception": "explicit exceptions or (none)",
+      "exception": "explicit exceptions or empty",
       "body": "supporting detail"
     }},
     "case": null or {{"case_id": "existing-or-new-id", "name": "case name", "description": "retrieval description"}},
@@ -2126,8 +2132,6 @@ existing_rules:
             )
             for rule in rules
         ]
-        if not any(rule.applies_when or rule.exception for rule in inputs):
-            return [1.0] * len(rules)
         client = RuleJevClient.from_config(config)
         if client is None:
             raise RuntimeError("Rule Jev judge is unavailable")

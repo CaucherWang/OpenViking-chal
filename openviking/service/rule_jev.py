@@ -26,6 +26,12 @@ class RuleJevInput:
     applies_when: str
     exception: str
 
+    def __post_init__(self) -> None:
+        normalized = self.applies_when.strip()
+        if normalized.casefold() in {"", "none", "(none)", "[]", "[ ]"}:
+            raise ValueError("Rule Jev input requires applies_when")
+        object.__setattr__(self, "applies_when", normalized)
+
 
 @dataclass(frozen=True)
 class RuleJevScore:
@@ -71,21 +77,20 @@ class RuleJevClient:
     def _questions(rules: List[RuleJevInput]) -> Dict[str, dict]:
         questions: Dict[str, dict] = {}
         for index, rule in enumerate(rules):
-            if rule.applies_when:
-                questions[f"applies_when_{index}"] = {
-                    "type": MODE_NOUL,
-                    "instructions": {
-                        "rule_index": index,
-                        "question": (
-                            "Does rules[rule_index] apply to task_context? Judge only "
-                            "applicability, not whether the Rule is satisfied or violated."
-                        ),
-                    },
-                    "criteria": {
-                        "true": rule.applies_when,
-                        "false": "The task context does not establish the applies_when criterion.",
-                    },
-                }
+            questions[f"applies_when_{index}"] = {
+                "type": MODE_NOUL,
+                "instructions": {
+                    "rule_index": index,
+                    "question": (
+                        "Does rules[rule_index] apply to task_context? Judge only "
+                        "applicability, not whether the Rule is satisfied or violated."
+                    ),
+                },
+                "criteria": {
+                    "true": rule.applies_when,
+                    "false": "The task context does not establish the applies_when criterion.",
+                },
+            }
             if rule.exception:
                 questions[f"exception_{index}"] = {
                     "type": MODE_NOUL,
@@ -162,7 +167,7 @@ class RuleJevClient:
                     applies_when=self._answer(
                         answers,
                         f"applies_when_{index}",
-                        expected=bool(rule.applies_when),
+                        expected=True,
                         default=1.0,
                     ),
                     exception=self._answer(
