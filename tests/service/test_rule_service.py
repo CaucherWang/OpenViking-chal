@@ -66,7 +66,6 @@ def test_rule_record_is_an_implicit_user_constraint():
         "scope",
         "scope_anchor",
         "condition",
-        "does_not_apply_when",
     }.isdisjoint(dumped)
     assert record.content == "Ask for confirmation before deleting files."
     assert record.exception == "when the user already explicitly confirmed this deletion"
@@ -86,7 +85,6 @@ def test_compile_prompt_does_not_expose_memory_preference_fields():
     assert '"confidence": "user"' in prompt
     assert '"content": "complete actionable constraint"' in prompt
     assert '"exception": "explicit exceptions or (none)"' in prompt
-    assert '"does_not_apply_when":' not in prompt
     assert '"condition":' not in prompt
     assert '"rule_text":' not in prompt
     assert '"type": "preference' not in prompt
@@ -168,7 +166,6 @@ async def test_load_rule_accepts_legacy_rule_text_frontmatter():
         "confidence": "high",
         "rule_text": "Confirm before deleting files.",
         "applies_when": "when deleting files",
-        "does_not_apply_when": "when deletion was already confirmed",
     }
     markdown = f"---\n{yaml.safe_dump(metadata, sort_keys=False)}---\n\nLegacy body.\n"
     service = RuleService()
@@ -184,9 +181,8 @@ async def test_load_rule_accepts_legacy_rule_text_frontmatter():
 
     assert rule.record.content == "Confirm before deleting files."
     assert rule.record.confidence == "high"
-    assert rule.record.exception == "when deletion was already confirmed"
+    assert rule.record.exception == ""
     assert "condition" not in rule.record.model_dump()
-    assert "does_not_apply_when" not in rule.record.model_dump()
 
 
 @pytest.mark.asyncio

@@ -1476,9 +1476,6 @@ class RuleService:
             field: metadata.get(field, "") for field in RuleRecord.model_fields if field != "body"
         }
         record_data["content"] = record_data["content"] or metadata.get("rule_text", "")
-        record_data["exception"] = record_data["exception"] or metadata.get(
-            "does_not_apply_when", ""
-        )
         record_data["body"] = strip_memory_fields_trailer(body)
         return StoredRule.model_validate(
             {
