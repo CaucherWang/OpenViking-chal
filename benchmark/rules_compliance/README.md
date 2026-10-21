@@ -17,7 +17,7 @@
 
 | 项目 | main 对照组 | rules 实验组 |
 |---|---|---|
-| 离线输入 | 整份 Markdown 作为 `peer_id=user` 的用户消息写入 Session，再调用 `session.commit` | `add_resource` 后调用 `rule_compile` |
+| 离线输入 | 整份 Markdown 作为 `peer_id=user` 的用户消息写入 Session，再调用 `session.commit` | 整份 Markdown 直接作为 `rule_compile` source |
 | 在线入口 | VikingBot 正常 `_process_message`，触发自动用户记忆召回 | VikingBot 正常 `_process_message` |
 | 在线工具 | VikingBot 默认只读工具，禁用 `openviking_rule_search` | VikingBot 默认只读工具 |
 | 在线 Skill | 无 | `openviking-rule-search` |

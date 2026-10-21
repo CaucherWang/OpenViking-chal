@@ -301,24 +301,6 @@ def offline(output: Path, arms: list[str]) -> None:
                 rules_trace,
                 files={"file": (POLICY.name, stream, "text/markdown")},
             )
-        resource = api(
-            rules_client,
-            "POST",
-            "/api/v1/resources",
-            rules_trace,
-            json={
-                "temp_file_id": upload["temp_file_id"],
-                "source_name": POLICY.name,
-                "to": "viking://resources/license_policy",
-                "wait": True,
-            },
-        )
-        write_json(runtime / "resources.json", {"rules": resource})
-
-        uri = resource.get("root_uri") or resource.get("uri")
-        if not uri:
-            rules_client.close()
-            raise RuntimeError(f"Rules resource URI missing: {resource}")
         compile_task = api(
             rules_client,
             "POST",
@@ -331,7 +313,13 @@ def offline(output: Path, arms: list[str]) -> None:
                     "content 中原样保留对应 Rxx 标识，并保留触发条件、核查方法、合规要求和"
                     "违规证据。不要归档、删除或停用规则。"
                 ),
-                "sources": [{"resource_uri": uri}],
+                "sources": [
+                    {
+                        "temp_file_id": upload["temp_file_id"],
+                        "source_name": POLICY.name,
+                        "to": "viking://resources/license_policy",
+                    }
+                ],
             },
         )
         write_json(runtime / "compile_task.json", compile_task)
@@ -355,7 +343,7 @@ def offline(output: Path, arms: list[str]) -> None:
         )
         rules_client.close()
         offline_stage["rules"] = {
-            "pipeline": "add_resource + rule_compile",
+            "pipeline": "temp_upload + rule_compile",
             "compile_task_id": compile_task["task_id"],
             "compile_result": compile_result,
             "retained_rule_ids": rules_inventory["rule_ids"],
