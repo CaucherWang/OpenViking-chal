@@ -28,18 +28,23 @@ Agent 如何检查仓库完全由 VikingBot 默认能力决定。两组收到完
 差异来自离线存储链路、`openviking_rule_search` 是否可用，以及实验组原生加载的通用
 Rule 工具使用 Skill；Skill 不拼接到用户 Prompt。
 
-主指标是 Agent 最终输出 Rule ID 的 macro recall 和 micro recall。Precision、F1、每仓
-差值、耗时和 Token 为辅助指标。诊断按三阶段拆分：
+召回指标统计实际返回给 Agent 的 Rule ID，包括自动记忆、OV 工具检索或读取的内容，
+以及导出 Session archive 后通过本地工具读取的内容；最终提交 recall 单独统计。
+Precision、F1、每仓差值、耗时和 Token 为辅助指标。诊断按三阶段拆分：
 
-1. 离线不可用：Session commit 或 Rule compile 后，对应存储中不存在该 Rxx。
-2. 在线未暴露：规则已入库，但自动召回与工具结果均未向 Agent 暴露该 Rxx。
+1. 离线不可用：Session commit 或 Rule compile 后，长期 Memory、Rule 和原始 archive
+   等本组存储中均不存在该 Rxx。
+2. 在线未暴露：规则已保存，但自动召回与工具结果均未向 Agent 暴露该 Rxx。
 3. 暴露未提交：Agent 已看到该 Rxx，但最终 JSON 没有提交。
 
 `runtime/main_memory_inventory.json` 和 `runtime/rules_inventory.json` 保存离线 Rxx
 保留情况；每次运行的 `result.json` 保存自动注入的 `relevant_memories` 和完整
 `tools_used`，评估脚本直接使用这些原始字段，不生成二次工具事件。Session commit
-即使没有生成长期 memory，也会保留原始 archive；评估另行统计 Agent 是否通过 OV
-工具发现该 archive，避免把手工兜底误记为自动记忆召回。
+即使没有生成长期 memory，也会保留原始 archive。archive 内容实际返回给 Agent
+就计入 recall，不与长期 Memory 入库清单取交集；同时单列 archive 召回贡献。
+仅发现 archive 路径不计入规则召回，搜索失败时回显的关键词也不计入。
+只计算工具实际返回的 Rule ID，不补算截断部分。离线 archive 清单见评估目录中的
+`main_archive_inventory.json`，它仅用于诊断，不直接计入在线 recall。
 
 ## 运行
 
@@ -50,7 +55,7 @@ OUTPUT=.openviking/experiments/rules-memory-vs-compiled-20261021-complete-2
 .venv/bin/python benchmark/rules_compliance/run.py \
   --arms main rules --concurrency 4 --output "$OUTPUT"
 .venv/bin/python benchmark/rules_compliance/evaluate.py \
-  --arms main rules --output "$OUTPUT"
+  --arms main rules --output "$OUTPUT" --evaluation-subdir evaluation-archive-inclusive
 ```
 
 先对单仓 smoke：
@@ -67,7 +72,9 @@ OUTPUT=.openviking/experiments/rules-memory-vs-compiled-20261021-complete-2
 | 指标 | main 对照组 | rules 实验组 |
 |---|---:|---:|
 | 完成运行 | 20/20 | 20/20 |
-| 离线保留规则 | 0/40 | 40/40 |
+| 长期 Memory / Rule 保留规则 | 0/40 | 40/40 |
+| 原始 Session archive 保留规则 | 40/40 | — |
+| archive 内容召回运行 | 0/20 | — |
 | 暴露 macro / micro recall | 0% / 0% | 100% / 100% |
 | 暴露 micro precision | 0% | 23.51% |
 | 最终提交 recall / precision / F1 | 0% / 0% / 0% | 93.92% / 66.15% / 77.63% |
@@ -75,5 +82,21 @@ OUTPUT=.openviking/experiments/rules-memory-vs-compiled-20261021-complete-2
 | 平均耗时 | 43.01s | 143.88s |
 | 平均 Token | 95,145 | 302,938 |
 
-汇总见 `evaluation/summary.json`，逐仓结果见 `evaluation/runs.json`，配对差值见
-`evaluation/pairs.json`。已存在的 `result.json` 不会被覆盖。
+本轮 main 的 181 个漏召回均为“已保存、在线未暴露”，不是离线丢失。
+汇总见 `evaluation-archive-inclusive/summary.json`，逐仓结果见同目录 `runs.json`，
+配对差值见 `pairs.json`。原 `evaluation/` 和 `result.json` 均保留。
+
+10 月 19 日历史运行按相同口径重算，保留其独立实验身份：
+
+```bash
+.venv/bin/python benchmark/rules_compliance/evaluate.py \
+  --arms main rules \
+  --output .openviking/experiments/rules-memory-vs-compiled-20261019 \
+  --evaluation-subdir evaluation-archive-inclusive
+```
+
+该轮 main 有 9/20 次运行获取 archive 内容，贡献 TP=70；
+暴露 macro / micro recall 为 38.31% / 38.67%，micro precision 为 28.81%。
+最终提交 recall / precision / F1 为 43.09% / 71.56% / 53.79%。
+这些历史数据不并入 10 月 21 日重跑结果，汇总位于其各自的
+`evaluation-archive-inclusive/summary.json`。

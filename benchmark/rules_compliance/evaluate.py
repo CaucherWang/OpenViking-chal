@@ -1,4 +1,4 @@
-"""Evaluate final Rule ID recall against the frozen manual trigger labels."""
+"""Evaluate rules exposed to the Agent, including retrieved Session archives."""
 
 from __future__ import annotations
 
@@ -19,24 +19,82 @@ def divide(numerator: int, denominator: int) -> float:
 
 
 def rule_ids_from(value: Any) -> set[str]:
-    return set(RULE_PATTERN.findall(json.dumps(value, ensure_ascii=False)))
+    if isinstance(value, str):
+        return set(RULE_PATTERN.findall(value))
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, (list, tuple)):
+        ids: set[str] = set()
+        for item in value:
+            ids.update(rule_ids_from(item))
+        return ids
+    return set()
 
 
-def tool_diagnostics(tools: list[dict[str, Any]]) -> tuple[set[str], int]:
+def tool_diagnostics(
+    tools: list[dict[str, Any]],
+    archive_marker: str | None = None,
+) -> tuple[set[str], int, set[str], bool]:
     exposed: set[str] = set()
+    archive_exposed: set[str] = set()
+    exported_archive_paths: set[str] = set()
+    archive_discovered = False
     rule_search_calls = 0
     for tool in tools:
         name = str(tool.get("tool_name") or tool.get("name") or "")
-        if not name.startswith("openviking_"):
-            continue
         if name == "openviking_rule_search":
             rule_search_calls += 1
-        exposed.update(rule_ids_from(tool.get("result")))
-    return exposed, rule_search_calls
+        if tool.get("execute_success") is False:
+            continue
+        result = tool.get("result")
+        text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+        if text.lstrip().startswith(("No matches found", "Error:", "Tool execution failed")):
+            continue
+        arguments = json.dumps(
+            tool.get("resolved_args") or tool.get("args") or {}, ensure_ascii=False
+        )
+        from_archive = bool(archive_marker and archive_marker in text)
+        targets_archive = bool(archive_marker and archive_marker in arguments)
+        if name.startswith("openviking_") and (from_archive or targets_archive):
+            archive_discovered = True
+        if name == "openviking_export" and targets_archive:
+            exported_archive_paths.update(
+                re.findall(r"^- (.+?)\s+\(\d+ bytes\)", text, flags=re.MULTILINE)
+            )
+        local_archive_read = name in {"exec", "read_file"} and (
+            from_archive or any(path in arguments for path in exported_archive_paths)
+        )
+        if not name.startswith("openviking_") and not local_archive_read:
+            continue
+        ids = rule_ids_from(result)
+        exposed.update(ids)
+        if from_archive or targets_archive or local_archive_read:
+            archive_exposed.update(ids)
+    return exposed, rule_search_calls, archive_exposed, archive_discovered
 
 
-def tools_contain(tools: list[dict[str, Any]], marker: str) -> bool:
-    return any(marker in str(tool.get("result") or "") for tool in tools)
+def archive_inventory(output: Path, session_id: str | None) -> dict[str, Any]:
+    """Inspect archived user messages separately from extracted long-term Memory."""
+    paths = (
+        sorted(
+            (output / "runtime/main/storage").glob(
+                f"viking/*/user/*/sessions/{session_id}/history/*/messages.jsonl"
+            )
+        )
+        if session_id
+        else []
+    )
+    ids: set[str] = set()
+    for path in paths:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            message = json.loads(line)
+            if message.get("role") == "user":
+                ids.update(rule_ids_from(message.get("parts")))
+    return {
+        "session_id": session_id,
+        "files": [str(path.relative_to(output)) for path in paths],
+        "rule_ids": sorted(ids),
+    }
 
 
 def evaluate(
@@ -44,6 +102,7 @@ def evaluate(
     phase: str,
     allow_partial: bool,
     selected_arms: list[str],
+    evaluation_subdir: str = "evaluation",
 ) -> dict[str, Any]:
     truth_document = read_json(GROUND_TRUTH)
     truth = {
@@ -54,12 +113,15 @@ def evaluate(
         "main": output / "runtime/main_memory_inventory.json",
         "rules": output / "runtime/rules_inventory.json",
     }
-    offline_available = {
-        arm: set(read_json(inventory_paths[arm])["rule_ids"]) for arm in selected_arms
-    }
+    stored_rules = {arm: set(read_json(inventory_paths[arm])["rule_ids"]) for arm in selected_arms}
     offline_stage = read_json(output / "runtime/offline_stage.json")
     main_session_id = (offline_stage.get("main") or {}).get("session_id")
     archive_marker = f"/sessions/{main_session_id}/history/" if main_session_id else None
+    main_archive = archive_inventory(output, main_session_id) if "main" in selected_arms else {}
+    archive_ids = set(main_archive.get("rule_ids") or [])
+    offline_available = {
+        arm: ids | (archive_ids if arm == "main" else set()) for arm, ids in stored_rules.items()
+    }
     rows: list[dict[str, Any]] = []
 
     for repo in repositories:
@@ -76,9 +138,11 @@ def evaluate(
             predicted = {item["rule_id"] for item in items if item.get("rule_id") in set(RULE_IDS)}
             recalled = rule_ids_from(result.get("relevant_memories"))
             tools = result.get("tools_used") or []
-            tool_exposed, rule_search_calls = tool_diagnostics(tools)
+            tool_exposed, rule_search_calls, archive_exposed, archive_discovered = tool_diagnostics(
+                tools, archive_marker if arm == "main" else None
+            )
             raw_exposed = recalled | tool_exposed
-            exposed = raw_exposed & offline_available[arm]
+            exposed = raw_exposed & set(RULE_IDS)
             true_positive = expected & exposed
             false_positive = exposed - expected
             false_negative = expected - exposed
@@ -100,12 +164,14 @@ def evaluate(
                     "false_positive": sorted(false_positive),
                     "false_negative": sorted(false_negative),
                     "recall": divide(len(true_positive), len(expected)),
-                    "precision": divide(len(true_positive), len(predicted)),
+                    "precision": divide(len(true_positive), len(exposed)),
                     "f1": divide(
                         2 * len(true_positive),
                         2 * len(true_positive) + len(false_positive) + len(false_negative),
                     ),
                     "offline_available_rule_ids": sorted(offline_available[arm]),
+                    "offline_stored_rule_ids": sorted(stored_rules[arm]),
+                    "offline_archive_rule_ids": sorted(archive_ids) if arm == "main" else [],
                     "auto_recalled_rule_ids": sorted(recalled),
                     "tool_exposed_rule_ids": sorted(tool_exposed),
                     "raw_exposed_rule_ids": sorted(raw_exposed),
@@ -121,11 +187,18 @@ def evaluate(
                         len(submitted_true_positive),
                         len(predicted),
                     ),
+                    "submission_f1": divide(
+                        2 * len(submitted_true_positive),
+                        2 * len(submitted_true_positive)
+                        + len(submitted_false_positive)
+                        + len(submitted_false_negative),
+                    ),
                     "rule_search_calls": rule_search_calls,
                     "auto_memory_recalled": bool(result.get("relevant_memories")),
-                    "session_archive_accessed": bool(
-                        arm == "main" and archive_marker and tools_contain(tools, archive_marker)
-                    ),
+                    "session_archive_discovered": archive_discovered,
+                    "session_archive_accessed": bool(archive_exposed),
+                    "session_archive_exposed_rule_ids": sorted(archive_exposed),
+                    "session_archive_true_positive": sorted(expected & archive_exposed),
                     "wall_seconds": result.get("wall_seconds"),
                     "usage": result.get("usage"),
                 }
@@ -153,6 +226,8 @@ def evaluate(
             "recall_basis": "rules_returned_to_agent",
             "offline_available_rule_ids": sorted(offline_available[arm]),
             "offline_missing_rule_ids": sorted(set(RULE_IDS) - offline_available[arm]),
+            "offline_stored_rule_ids": sorted(stored_rules[arm]),
+            "offline_archive_rule_ids": sorted(archive_ids) if arm == "main" else [],
             "macro_recall": mean(row["recall"] for row in arm_rows) if arm_rows else 0.0,
             "micro_recall": divide(tp, tp + fn),
             "micro_precision": divide(tp, tp + fp),
@@ -182,9 +257,12 @@ def evaluate(
             },
             "rule_search_calls": sum(row["rule_search_calls"] for row in arm_rows),
             "auto_memory_recall_runs": sum(row["auto_memory_recalled"] for row in arm_rows),
+            "session_archive_discovery_runs": sum(
+                row["session_archive_discovered"] for row in arm_rows
+            ),
             "session_archive_access_runs": len(archive_rows),
             "session_archive_access_true_positive": sum(
-                len(row["true_positive"]) for row in archive_rows
+                len(row["session_archive_true_positive"]) for row in archive_rows
             ),
             "session_archive_access_expected": sum(len(row["expected"]) for row in archive_rows),
             "no_session_archive_access_true_positive": sum(
@@ -215,7 +293,7 @@ def evaluate(
             )
 
     summary = {
-        "schema": "rules-recall-evaluation/v2",
+        "schema": "rules-recall-evaluation/v3",
         "phase": phase,
         "recall_basis": "rules_returned_to_agent",
         "selected_arms": selected_arms,
@@ -229,7 +307,9 @@ def evaluate(
             "rules_worse": sum(item["delta"] < 0 for item in paired),
         },
     }
-    destination = output / "evaluation"
+    destination = output / evaluation_subdir
+    if main_archive:
+        write_json(destination / "main_archive_inventory.json", main_archive)
     write_json(destination / "runs.json", rows)
     write_json(destination / "pairs.json", paired)
     write_json(destination / "summary.json", summary)
@@ -241,6 +321,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--phase", default="primary")
+    parser.add_argument("--evaluation-subdir", default="evaluation")
     parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument("--arms", nargs="+", choices=("main", "rules"), default=["main", "rules"])
     arguments = parser.parse_args()
@@ -249,4 +330,5 @@ if __name__ == "__main__":
         arguments.phase,
         arguments.allow_partial,
         list(dict.fromkeys(arguments.arms)),
+        arguments.evaluation_subdir,
     )
