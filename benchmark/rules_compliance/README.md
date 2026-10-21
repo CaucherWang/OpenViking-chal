@@ -8,6 +8,7 @@
 - 规则集：`.openviking/experiments/rules-compliance-20261016/sources/open_source_compliance_rules.md`
 - 数据集：同目录 `repositories/manifest.json` 固定的 volcengine Top20 checkout
 - 人工标签：`benchmark/rules_compliance/ground_truth.json`
+- 实验 Skill：`.trae/skills/openviking-rule-search/SKILL.md`
 
 不重新抓取仓库、排名或规则来源。Ground Truth 只标注 Rule 的触发条件是否由 checkout
 中的证据建立，不标注最终合规结论。
@@ -19,11 +20,13 @@
 | 离线输入 | 整份 Markdown 作为 `peer_id=user` 的用户消息写入 Session，再调用 `session.commit` | 整份 Markdown 直接作为 `rule_compile` source |
 | 在线入口 | VikingBot 正常 `_process_message`，触发自动用户记忆召回 | VikingBot 正常 `_process_message` |
 | 在线工具 | VikingBot 默认只读工具，禁用 `openviking_rule_search` | VikingBot 默认只读工具 |
+| 在线 Skill | 无 | 通过 VikingBot sandbox 原生加载 `openviking-rule-search` |
 | 模型 / 本地仓库路径 / 审计与提交要求 | 相同 | 相同 |
 
 脚本不注册工具，也不实现仓库扫描逻辑，只把冻结 checkout 的本地路径交给 VikingBot。
 Agent 如何检查仓库完全由 VikingBot 默认能力决定。两组收到完全相同的审计请求，
-差异仅来自离线存储链路以及 `openviking_rule_search` 是否可用。
+差异来自离线存储链路、`openviking_rule_search` 是否可用，以及实验组原生加载的通用
+Rule 工具使用 Skill；Skill 不拼接到用户 Prompt。
 
 主指标是 Agent 最终输出 Rule ID 的 macro recall 和 micro recall。Precision、F1、每仓
 差值、耗时和 Token 为辅助指标。诊断按三阶段拆分：

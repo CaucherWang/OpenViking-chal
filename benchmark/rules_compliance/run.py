@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -20,6 +21,7 @@ from experiment import (
     PORTS,
     ROOT,
     RULE_IDS,
+    RULE_SKILL,
     read_json,
     write_json,
 )
@@ -199,6 +201,10 @@ async def audit(output: Path, repo: dict[str, Any], arm: str, phase: str) -> Non
     )
     sandbox_workspace = sandbox_manager.get_workspace_path(session_key)
     sandbox_workspace.mkdir(parents=True, exist_ok=True)
+    if arm == "rules":
+        skill_dir = sandbox_workspace / "skills" / "openviking-rule-search"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(RULE_SKILL, skill_dir / "SKILL.md")
     repository_link = sandbox_workspace / "repository"
     if not repository_link.exists():
         repository_link.symlink_to(repository, target_is_directory=True)
@@ -242,6 +248,7 @@ async def audit(output: Path, repo: dict[str, Any], arm: str, phase: str) -> Non
             definition["function"]["name"]
             for definition in loop.tools.get_definitions(disabled_tools=disabled_tools)
         ),
+        "skill": "openviking-rule-search" if arm == "rules" else None,
     }
     try:
         await loop._connect_mcp()

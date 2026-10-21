@@ -12,6 +12,7 @@ DEFAULT_OUTPUT = ROOT / ".openviking/experiments/rules-memory-vs-compiled-202610
 MANIFEST = DATASET / "repositories/manifest.json"
 POLICY = DATASET / "sources/open_source_compliance_rules.md"
 GROUND_TRUTH = ROOT / "benchmark/rules_compliance/ground_truth.json"
+RULE_SKILL = ROOT / ".trae/skills/openviking-rule-search/SKILL.md"
 PORTS = {"main": 2233, "rules": 2333}
 RULE_IDS = tuple(f"R{index:02d}" for index in range(1, 41))
 
