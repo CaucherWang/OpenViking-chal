@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 from experiment import DEFAULT_OUTPUT, POLICY, PORTS, ROOT, RULE_IDS, write_json
+from openviking_sdk import SyncHTTPClient
 
 RULE_PATTERN = re.compile(r"\bR(?:0[1-9]|[1-3][0-9]|40)\b")
 
@@ -289,39 +290,25 @@ def offline(output: Path, arms: list[str]) -> None:
 
     if "rules" in arms:
         rules_trace = runtime / "rules.offline.jsonl"
+        rules_url = f"http://127.0.0.1:{PORTS['rules']}"
         rules_client = httpx.Client(
-            base_url=f"http://127.0.0.1:{PORTS['rules']}",
+            base_url=rules_url,
             timeout=1200,
         )
-        with POLICY.open("rb") as stream:
-            upload = api(
-                rules_client,
-                "POST",
-                "/api/v1/resources/temp_upload",
-                rules_trace,
-                files={"file": (POLICY.name, stream, "text/markdown")},
-            )
-        compile_task = api(
-            rules_client,
-            "POST",
-            "/api/v1/rules/compile",
-            rules_trace,
-            json={
-                "instruction": (
+        rules_sdk = SyncHTTPClient(url=rules_url, timeout=1200)
+        rules_sdk.initialize()
+        try:
+            compile_task = rules_sdk.rule_compile(
+                (
                     "将文档中的 R01 到 R40 编译为可检索的独立强约束。每条源规则必须独立"
                     "编译，不得合并、遗漏或补充文档外义务；在 Rule 的 name、description 或"
                     "content 中原样保留对应 Rxx 标识，并保留触发条件、核查方法、合规要求和"
                     "违规证据。不要归档、删除或停用规则。"
                 ),
-                "sources": [
-                    {
-                        "temp_file_id": upload["temp_file_id"],
-                        "source_name": POLICY.name,
-                        "to": "viking://resources/license_policy",
-                    }
-                ],
-            },
-        )
+                options={"sources": [str(POLICY)]},
+            )
+        finally:
+            rules_sdk.close()
         write_json(runtime / "compile_task.json", compile_task)
         compile_state = wait_task(
             rules_client,
@@ -343,7 +330,7 @@ def offline(output: Path, arms: list[str]) -> None:
         )
         rules_client.close()
         offline_stage["rules"] = {
-            "pipeline": "temp_upload + rule_compile",
+            "pipeline": "rule_compile(local source)",
             "compile_task_id": compile_task["task_id"],
             "compile_result": compile_result,
             "retained_rule_ids": rules_inventory["rule_ids"],
