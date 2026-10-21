@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from openviking.server.identity import RequestContext, Role
+from openviking.service.rule_jev import RuleJevScore
 from openviking.service.rule_resource_ingest import AddResourceRequest
 from openviking.service.rule_service import (
     CASE_SCHEMA,
@@ -373,27 +374,30 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
             self.closed = False
             self.calls = []
 
-        def rerank_batch(self, query, documents):
-            assert query == "delete generated files"
-            assert len(documents) == 6
-            self.calls.append((query, documents))
-            assert "Rule ID: rule-a" in documents[0]
-            assert "legacy hidden value" not in documents[0]
-            assert "Condition:" not in documents[0]
-            assert "Constraint:" not in documents[0]
-            assert all("applies_when:" in documents[index] for index in (0, 2, 4))
-            assert all("exception:" in documents[index] for index in (1, 3, 5))
-            return [0.9, 0.1, 0.8, 0.7, 0.6, 0.8]
+        def judge_rules(self, task_context, inputs):
+            assert task_context == "delete generated files"
+            assert len(inputs) == 4
+            self.calls.append((task_context, inputs))
+            assert inputs[0].name == "rule-a"
+            assert inputs[0].content == "Ask for confirmation before deleting files."
+            assert "legacy hidden value" not in inputs[0].content
+            assert inputs[0].applies_when == "when a task requires deleting files"
+            assert inputs[0].exception == (
+                "when the user already explicitly confirmed this deletion"
+            )
+            assert inputs[3].applies_when == ""
+            assert inputs[3].exception == ""
+            return [
+                RuleJevScore(applies_when=0.9, exception=0.1),
+                RuleJevScore(applies_when=0.8, exception=0.7),
+                RuleJevScore(applies_when=0.6, exception=0.8),
+                RuleJevScore(applies_when=1.0, exception=0.0),
+            ]
 
         def close(self):
             self.closed = True
 
     client = _JevClient()
-    captured_questions = []
-
-    def create_judge(config, *, questions):
-        captured_questions.extend(questions)
-        return client
 
     service = RuleService()
     service.set_dependencies(
@@ -409,8 +413,8 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
     vlm_score = AsyncMock(side_effect=AssertionError("VLM matcher must not run"))
     monkeypatch.setattr(service, "_score_rules_with_vlm", vlm_score)
     monkeypatch.setattr(
-        "openviking.service.rule_service.create_rule_jev_multi_judge",
-        create_judge,
+        "openviking.service.rule_service.RuleJevClient",
+        SimpleNamespace(from_config=lambda config: client),
     )
 
     scores, backend, warning = await service._score_rules(
@@ -424,11 +428,6 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
     assert warning is None
     assert client.closed is True
     assert len(client.calls) == 1
-    assert len(captured_questions) == 6
-    assert "applies_when clause" in captured_questions[0].question
-    assert "exception clause" in captured_questions[1].question
-    assert "entire applies_when clause" in captured_questions[0].true_criterion
-    assert "entire exception clause" in captured_questions[1].true_criterion
     vlm_score.assert_not_awaited()
 
 
@@ -438,7 +437,7 @@ async def test_jev_rule_matcher_failure_falls_back_to_vlm(monkeypatch):
         def __init__(self):
             self.closed = False
 
-        def rerank_batch(self, query, documents):
+        def judge_rules(self, task_context, inputs):
             raise RuntimeError("Jev unavailable")
 
         def close(self):
@@ -459,8 +458,8 @@ async def test_jev_rule_matcher_failure_falls_back_to_vlm(monkeypatch):
     vlm_score = AsyncMock(return_value=[0.7])
     monkeypatch.setattr(service, "_score_rules_with_vlm", vlm_score)
     monkeypatch.setattr(
-        "openviking.service.rule_service.create_rule_jev_multi_judge",
-        lambda config, **kwargs: client,
+        "openviking.service.rule_service.RuleJevClient",
+        SimpleNamespace(from_config=lambda config: client),
     )
 
     scores, backend, warning = await service._score_rules(

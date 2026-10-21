@@ -24,9 +24,9 @@ from openviking.server.identity import RequestContext
 from openviking.service.fs_service import FSService
 from openviking.service.resource_service import ResourceService
 from openviking.service.rule_jev import (
-    RuleNoulQuestion,
+    RuleJevClient,
+    RuleJevInput,
     create_rule_jev_judge,
-    create_rule_jev_multi_judge,
 )
 from openviking.service.rule_resource_ingest import (
     AddResourceRequest,
@@ -65,7 +65,6 @@ RULE_OPERATIONS = frozenset(
 )
 MAX_SOURCE_CHARS = 128_000
 MAX_SOURCE_FILES = 128
-MAX_RULE_CHARS_FOR_JUDGE = 16_000
 MAX_RULES_PER_MATCHER_BATCH = 20
 MAX_CASE_CHARS_FOR_JUDGE = 16_000
 MAX_CASES_PER_MATCHER_BATCH = 20
@@ -79,30 +78,6 @@ DEFAULT_RULE_PROBABILITY_THRESHOLD = 0.65
 DEFAULT_DELETED_RETENTION_DAYS = 30
 MAX_COMPILE_REPAIR_ATTEMPTS = 2
 COMPILER_RULE_STATUSES = frozenset({"active", "archived"})
-
-_RULE_APPLIES_WHEN_QUESTION = (
-    "Is the applies_when clause in candidate_documents[candidate_index] established by "
-    "concrete facts in the current task context in query? Judge only whether the clause "
-    "holds; do not judge whether the object passes or fails the Rule."
-)
-_RULE_APPLIES_WHEN_TRUE_CRITERION = (
-    "The current task context provides concrete facts satisfying the entire applies_when clause."
-)
-_RULE_APPLIES_WHEN_FALSE_CRITERION = (
-    "The current task context contradicts, does not establish, or leaves a material part of "
-    "the applies_when clause unknown. Compliance outcome is irrelevant."
-)
-_RULE_EXCEPTION_QUESTION = (
-    "Is the exception clause in candidate_documents[candidate_index] established by "
-    "concrete facts in the current task context in query? Judge only whether the exception holds."
-)
-_RULE_EXCEPTION_TRUE_CRITERION = (
-    "The current task context provides concrete facts satisfying the entire exception clause."
-)
-_RULE_EXCEPTION_FALSE_CRITERION = (
-    "The current task context contradicts, does not establish, or leaves a material part of "
-    "the exception clause unknown."
-)
 
 
 def _media_extension(value: str | None) -> str | None:
@@ -467,20 +442,6 @@ def _render_rule_block(rule: StoredRule) -> str:
 def _meaningful_applicability_clause(value: str) -> str:
     stripped = value.strip()
     return "" if stripped.casefold() in {"", "none", "(none)", "[]", "[ ]"} else stripped
-
-
-def _render_applies_when_for_judge(rule: StoredRule) -> str:
-    return (
-        f"Rule ID: {rule.atomic_id}\n"
-        f"applies_when: {_meaningful_applicability_clause(rule.record.applies_when)}"
-    )[:MAX_RULE_CHARS_FOR_JUDGE]
-
-
-def _render_exception_for_judge(rule: StoredRule) -> str:
-    return (
-        f"Rule ID: {rule.atomic_id}\n"
-        f"exception: {_meaningful_applicability_clause(rule.record.exception)}"
-    )[:MAX_RULE_CHARS_FOR_JUDGE]
 
 
 def _render_rules(selected: list[tuple[StoredRule, float]]) -> str:
@@ -2156,63 +2117,32 @@ existing_rules:
         *,
         exception_veto_threshold: float,
     ) -> list[float]:
-        applies_scores = [1.0] * len(rules)
-        exception_scores = [0.0] * len(rules)
-        documents: list[str] = []
-        questions: list[RuleNoulQuestion] = []
-        assignments: list[tuple[str, int]] = []
-        for index, rule in enumerate(rules):
-            if _meaningful_applicability_clause(rule.record.applies_when):
-                documents.append(_render_applies_when_for_judge(rule))
-                questions.append(
-                    RuleNoulQuestion(
-                        question=_RULE_APPLIES_WHEN_QUESTION,
-                        true_criterion=_RULE_APPLIES_WHEN_TRUE_CRITERION,
-                        false_criterion=_RULE_APPLIES_WHEN_FALSE_CRITERION,
-                    )
-                )
-                assignments.append(("applies_when", index))
-            if _meaningful_applicability_clause(rule.record.exception):
-                documents.append(_render_exception_for_judge(rule))
-                questions.append(
-                    RuleNoulQuestion(
-                        question=_RULE_EXCEPTION_QUESTION,
-                        true_criterion=_RULE_EXCEPTION_TRUE_CRITERION,
-                        false_criterion=_RULE_EXCEPTION_FALSE_CRITERION,
-                    )
-                )
-                assignments.append(("exception", index))
-
-        if documents:
-            client = create_rule_jev_multi_judge(config, questions=questions)
-            if client is None:
-                raise RuntimeError("Jev Noul judge is unavailable")
-            try:
-                scores = await asyncio.to_thread(
-                    client.rerank_batch,
-                    task_context,
-                    documents,
-                )
-            finally:
-                client.close()
-            if scores is None or len(scores) != len(assignments):
-                raise ValueError("Jev Noul returned incomplete Rule scores")
-        else:
-            scores = []
-
-        for (kind, index), score in zip(assignments, scores, strict=True):
-            destination = applies_scores if kind == "applies_when" else exception_scores
-            destination[index] = score
+        inputs = [
+            RuleJevInput(
+                name=rule.record.name,
+                content=rule.record.content,
+                applies_when=_meaningful_applicability_clause(rule.record.applies_when),
+                exception=_meaningful_applicability_clause(rule.record.exception),
+            )
+            for rule in rules
+        ]
+        if not any(rule.applies_when or rule.exception for rule in inputs):
+            return [1.0] * len(rules)
+        client = RuleJevClient.from_config(config)
+        if client is None:
+            raise RuntimeError("Rule Jev judge is unavailable")
+        try:
+            scores = await asyncio.to_thread(client.judge_rules, task_context, inputs)
+        finally:
+            client.close()
+        if scores is None or len(scores) != len(rules):
+            raise ValueError("Rule Jev returned incomplete scores")
 
         return [
             0.0
-            if exception_score >= exception_veto_threshold and exception_score > applies_score
-            else applies_score
-            for applies_score, exception_score in zip(
-                applies_scores,
-                exception_scores,
-                strict=True,
-            )
+            if score.exception >= exception_veto_threshold and score.exception > score.applies_when
+            else score.applies_when
+            for score in scores
         ]
 
     async def _score_rules(
