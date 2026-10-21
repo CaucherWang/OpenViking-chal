@@ -11,7 +11,7 @@
 - 实验 Skill：`examples/skills/openviking-rule-search/SKILL.md`
 
 不重新抓取仓库、排名或规则来源。Ground Truth 只标注 Rule 的触发条件是否由 checkout
-中的证据建立，不标注最终合规结论。
+中的证据建立，不标注最终合规结论，共 181 个适用规则分配。
 
 ## 双臂
 
@@ -44,10 +44,13 @@ Rule 工具使用 Skill；Skill 不拼接到用户 Prompt。
 ## 运行
 
 ```bash
-.venv/bin/python benchmark/rules_compliance/setup.py start
-.venv/bin/python benchmark/rules_compliance/setup.py offline
-.venv/bin/python benchmark/rules_compliance/run.py --concurrency 4
-.venv/bin/python benchmark/rules_compliance/evaluate.py
+OUTPUT=.openviking/experiments/rules-memory-vs-compiled-20261021-complete-2
+.venv/bin/python benchmark/rules_compliance/setup.py start --output "$OUTPUT"
+.venv/bin/python benchmark/rules_compliance/setup.py offline --output "$OUTPUT"
+.venv/bin/python benchmark/rules_compliance/run.py \
+  --arms main rules --concurrency 4 --output "$OUTPUT"
+.venv/bin/python benchmark/rules_compliance/evaluate.py \
+  --arms main rules --output "$OUTPUT"
 ```
 
 先对单仓 smoke：
@@ -59,6 +62,18 @@ Rule 工具使用 Skill；Skill 不拼接到用户 Prompt。
   --phase smoke --allow-partial
 ```
 
-新结果写入 `.openviking/experiments/rules-memory-vs-compiled-20261019/`，不会覆盖
-上一轮 resource-vs-rules 实验。已存在的 `result.json` 不会被覆盖；需要重跑时只删除
-对应仓库和 arm 的运行目录。
+本轮结果位于 `.openviking/experiments/rules-memory-vs-compiled-20261021-complete-2/`：
+
+| 指标 | main 对照组 | rules 实验组 |
+|---|---:|---:|
+| 完成运行 | 20/20 | 20/20 |
+| 离线保留规则 | 0/40 | 40/40 |
+| 暴露 macro / micro recall | 0% / 0% | 100% / 100% |
+| 暴露 micro precision | 0% | 23.51% |
+| 最终提交 recall / precision / F1 | 0% / 0% / 0% | 93.92% / 66.15% / 77.63% |
+| Rule Search 调用 | 0 | 42 |
+| 平均耗时 | 43.01s | 143.88s |
+| 平均 Token | 95,145 | 302,938 |
+
+汇总见 `evaluation/summary.json`，逐仓结果见 `evaluation/runs.json`，配对差值见
+`evaluation/pairs.json`。已存在的 `result.json` 不会被覆盖。

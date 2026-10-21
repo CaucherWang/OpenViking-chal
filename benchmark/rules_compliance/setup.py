@@ -9,12 +9,16 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 import httpx
 from experiment import DEFAULT_OUTPUT, POLICY, PORTS, ROOT, RULE_IDS, write_json
+
+sys.path.insert(0, str(ROOT / "sdk/python"))
+
 from openviking_sdk import SyncHTTPClient
 
 RULE_PATTERN = re.compile(r"\bR(?:0[1-9]|[1-3][0-9]|40)\b")
