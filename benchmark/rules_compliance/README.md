@@ -8,7 +8,7 @@
 - 规则集：`.openviking/experiments/rules-compliance-20261016/sources/open_source_compliance_rules.md`
 - 数据集：同目录 `repositories/manifest.json` 固定的 volcengine Top20 checkout
 - 人工标签：`benchmark/rules_compliance/ground_truth.json`
-- 实验 Skill：`.trae/skills/openviking-rule-search/SKILL.md`
+- 实验 Skill：`examples/skills/openviking-rule-search/SKILL.md`
 
 不重新抓取仓库、排名或规则来源。Ground Truth 只标注 Rule 的触发条件是否由 checkout
 中的证据建立，不标注最终合规结论。
