@@ -17,7 +17,8 @@ def test_rule_search_tool_describes_only_defined_applicability_fields():
     description = VikingRuleSearchTool().description
 
     assert "applies_when" in description
-    assert "does_not_apply_when" in description
+    assert "exception" in description
+    assert "does_not_apply_when" not in description
     assert "conditions" not in description
 
 
