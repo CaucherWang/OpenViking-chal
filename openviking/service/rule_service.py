@@ -403,15 +403,13 @@ class _RelevantRules:
 
 _RULE_APPLICATION_GUIDANCE = """# Applicable OpenViking Rules
 
-These compiled Rules are behavioral constraints, not evidence about the object or
-situation being evaluated.
+These Rules are behavioral constraints.
 
 Application protocol:
 1. Evaluate every Rule independently against concrete facts from the current task.
-2. Topic similarity alone does not make a Rule applicable.
-3. Check the applicability boundary and exception before applying a Rule.
-4. Apply the minimum sufficient set of Rules, and do not infer facts that are absent.
-5. Before acting or answering, validate the planned action or answer against every
+2. Check the applicability boundary and exception before applying a Rule. Topic similarity alone does not make a Rule applicable.
+3. Do not infer facts that are absent.
+4. Before acting or answering, validate the planned action or answer against every
    returned Rule. Returned Rules are mandatory when their applicability conditions hold."""
 
 
@@ -423,7 +421,7 @@ def _render_rule_block(rule: StoredRule) -> str:
         body = ""
 
     lines = [
-        f"## [{rule.atomic_id}@{rule.revision}] {record.name}",
+        f"## [{rule.atomic_id}] {record.name}",
         "",
         "Constraint:",
         record.content.strip(),

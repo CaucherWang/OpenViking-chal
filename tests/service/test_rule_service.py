@@ -1004,7 +1004,7 @@ async def test_search_returns_only_rules_above_independent_probability_threshold
     assert result["judge"] == "jev_noul"
     assert [rule["atomic_id"] for rule in result["rules"]] == ["a"]
     assert result["rules"][0]["content"] == "complete rule a"
-    assert "[a@1]" in result["rendered"]
+    assert "[a]" in result["rendered"]
     assert "Ask for confirmation before deleting files." in result["rendered"]
     assert "Condition:" not in result["rendered"]
     assert "Rules are behavioral constraints" in result["rendered"]
