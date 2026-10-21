@@ -89,16 +89,15 @@ _RULE_APPLIES_WHEN_FALSE_CRITERION = (
     "the applies_when clause unknown. Compliance outcome is irrelevant."
 )
 _RULE_EXCEPTION_QUESTION = (
-    "Is the does_not_apply_when clause in candidate_documents[candidate_index] established by "
+    "Is the exception clause in candidate_documents[candidate_index] established by "
     "concrete facts in the current task context in query? Judge only whether the exception holds."
 )
 _RULE_EXCEPTION_TRUE_CRITERION = (
-    "The current task context provides concrete facts satisfying the entire "
-    "does_not_apply_when clause."
+    "The current task context provides concrete facts satisfying the entire exception clause."
 )
 _RULE_EXCEPTION_FALSE_CRITERION = (
     "The current task context contradicts, does not establish, or leaves a material part of "
-    "the does_not_apply_when clause unknown."
+    "the exception clause unknown."
 )
 
 
@@ -300,7 +299,7 @@ class RuleRecord(BaseModel):
     confidence: Literal["user", "high", "medium", "low"] = "user"
     content: str = Field(min_length=1, max_length=16_000)
     applies_when: str = Field(default="", max_length=4_000)
-    does_not_apply_when: str = Field(default="", max_length=4_000)
+    exception: str = Field(default="", max_length=4_000)
     body: str = Field(default="", max_length=32_000)
 
 
@@ -443,7 +442,7 @@ def _render_rule_block(rule: StoredRule) -> str:
         record.content.strip(),
         "",
         f"Applies when: {record.applies_when.strip() or '(none specified)'}",
-        f"Does not apply when: {record.does_not_apply_when.strip() or '(none specified)'}",
+        f"Exception: {record.exception.strip() or '(none specified)'}",
     ]
     description = record.description.strip()
     if description and description != record.content.strip():
@@ -476,8 +475,7 @@ def _render_applies_when_for_judge(rule: StoredRule) -> str:
 def _render_exception_for_judge(rule: StoredRule) -> str:
     return (
         f"Rule ID: {rule.atomic_id}\n"
-        "does_not_apply_when: "
-        f"{_meaningful_applicability_clause(rule.record.does_not_apply_when)}"
+        f"exception: {_meaningful_applicability_clause(rule.record.exception)}"
     )[:MAX_RULE_CHARS_FOR_JUDGE]
 
 
@@ -813,7 +811,7 @@ class RuleService:
         def applicability(record: RuleRecord) -> tuple[str, str]:
             return (
                 record.applies_when.strip(),
-                meaningful_exception(record.does_not_apply_when),
+                meaningful_exception(record.exception),
             )
 
         for index, mutation in enumerate(plan.mutations):
@@ -1478,6 +1476,9 @@ class RuleService:
             field: metadata.get(field, "") for field in RuleRecord.model_fields if field != "body"
         }
         record_data["content"] = record_data["content"] or metadata.get("rule_text", "")
+        record_data["exception"] = record_data["exception"] or metadata.get(
+            "does_not_apply_when", ""
+        )
         record_data["body"] = strip_memory_fields_trailer(body)
         return StoredRule.model_validate(
             {
@@ -1744,7 +1745,7 @@ meaning are more important than brevity.
   but must not contradict or silently broaden `content`.
 - `applies_when` must describe an objectively decidable situation in which the Rule is
   selected. It must not merely restate the obligation or refer to an internal future
-  reasoning step. `does_not_apply_when` lists only genuine exceptions. Use "(none)"
+  reasoning step. `exception` lists only genuine exceptions. Use "(none)"
   when the source states no exception rather than inventing one.
 
 3. Atomic policy units
@@ -1811,7 +1812,7 @@ meaning are more important than brevity.
 - NEW and REPLACE applicability must have `applicability_evidence`: an exact source
   quotation supporting every non-empty applies_when or meaningful exception.
 - UPDATE may use `applicability_evidence` value `existing:<primary_atomic_id>` only when
-  applies_when and does_not_apply_when are preserved exactly from that Rule.
+  applies_when and exception are preserved exactly from that Rule.
   Any changed applicability requires an exact quotation from the new material.
 - Every UPDATE must include `carried_over.existing_requirements`, listing the old
   requirements, triggers, timing anchors, and exceptions considered. Put a requirement
@@ -1837,7 +1838,7 @@ Return JSON only with this shape:
       "confidence": "user",
       "content": "complete actionable constraint",
       "applies_when": "decidable trigger",
-      "does_not_apply_when": "explicit exceptions or (none)",
+      "exception": "explicit exceptions or (none)",
       "body": "supporting detail"
     }},
     "case": null or {{"case_id": "existing-or-new-id", "name": "case name", "description": "retrieval description"}},
@@ -2190,7 +2191,7 @@ existing_rules:
         exception_indices = [
             index
             for index, rule in enumerate(rules)
-            if _meaningful_applicability_clause(rule.record.does_not_apply_when)
+            if _meaningful_applicability_clause(rule.record.exception)
         ]
         jobs = []
         kinds = []
@@ -2206,7 +2207,7 @@ existing_rules:
                 )
             )
         if exception_indices:
-            kinds.append("does_not_apply_when")
+            kinds.append("exception")
             jobs.append(
                 judge(
                     exception_indices,
@@ -2306,11 +2307,10 @@ existing_rules:
         ]
         prompt = f"""
 Evaluate only whether each saved Rule applies to the current task. Consider applies_when
-and does_not_apply_when. Topic similarity is not sufficient.
+and exception. Topic similarity is not sufficient.
 
 Applicability is independent of the compliance outcome:
-- A Rule is applicable when its applies_when is established and does_not_apply_when is
-  not established.
+- A Rule is applicable when its applies_when is established and exception is not established.
 - Do not judge whether the object passes or fails the Rule.
 - Do not lower applicability because the requirement is satisfied, validation passes,
   no violation is found, or the outcome is undetermined.
