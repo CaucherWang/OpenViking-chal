@@ -88,7 +88,6 @@ class RuleJevClient:
                 },
                 "criteria": {
                     "true": rule.applies_when,
-                    "false": "The task context does not establish the applies_when criterion.",
                 },
             }
             if rule.exception:
@@ -102,7 +101,6 @@ class RuleJevClient:
                     },
                     "criteria": {
                         "true": rule.exception,
-                        "false": "The task context does not establish the exception criterion.",
                     },
                 }
         return questions

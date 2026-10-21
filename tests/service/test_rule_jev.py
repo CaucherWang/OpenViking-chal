@@ -111,16 +111,16 @@ def test_rule_jev_sends_rule_state_and_clause_criteria(mock_client_class):
             "not whether the Rule is satisfied or violated."
         ),
     }
-    assert request["questions"]["applies_when_0"]["criteria"]["true"] == (
-        "The task changes production configuration."
-    )
+    assert request["questions"]["applies_when_0"]["criteria"] == {
+        "true": "The task changes production configuration."
+    }
     assert request["questions"]["exception_0"]["instructions"] == {
         "rule_index": 0,
         "question": "Does an exception to rules[rule_index] apply to task_context?",
     }
-    assert request["questions"]["exception_0"]["criteria"]["true"] == (
-        "The task is limited to read-only inspection."
-    )
+    assert request["questions"]["exception_0"]["criteria"] == {
+        "true": "The task is limited to read-only inspection."
+    }
     assert mock_client_class.return_value.post.call_count == 1
     client.close()
 
