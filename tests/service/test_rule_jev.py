@@ -11,8 +11,8 @@ from openviking.service.rule_jev import (
 from openviking_cli.utils.config.rerank_config import RerankConfig
 
 
-@pytest.mark.parametrize("applies_when", ["", " ", "none", "(none)", "[]"])
-def test_rule_jev_input_requires_applies_when(applies_when):
+@pytest.mark.parametrize("applies_when", ["none", "(none)", "[]"])
+def test_rule_jev_input_rejects_placeholder_applies_when(applies_when):
     with pytest.raises(ValueError, match="requires applies_when"):
         RuleJevInput(
             name="Protect production configuration",
@@ -20,6 +20,17 @@ def test_rule_jev_input_requires_applies_when(applies_when):
             applies_when=applies_when,
             exception="",
         )
+
+
+@pytest.mark.parametrize("applies_when", ["", " \n"])
+def test_rule_jev_input_accepts_empty_applies_when(applies_when):
+    rule = RuleJevInput(
+        name="Unconditional constraint",
+        content="Always preserve confidentiality.",
+        applies_when=applies_when,
+        exception="",
+    )
+    assert rule.applies_when == ""
 
 
 @patch("openviking.models.rerank.jev_rerank.httpx.Client")
@@ -50,7 +61,7 @@ def test_rule_jev_judge_isolates_custom_question_and_headers(mock_client_class):
     )
 
     assert client is not None
-    assert client.rerank_batch("task", ["case"]) == [0.93]
+    assert client.rerank_batch("task", ["scenario"]) == [0.93]
     question = mock_client_class.return_value.post.call_args.kwargs["json"]["questions"][
         "relevance_0"
     ]
@@ -173,4 +184,37 @@ def test_rule_jev_omits_empty_exception_question(mock_client_class):
     ) == [RuleJevScore(applies_when=0.84, exception=0.0)]
     questions = mock_client_class.return_value.post.call_args.kwargs["json"]["questions"]
     assert set(questions) == {"applies_when_0"}
+    client.close()
+
+
+@patch("openviking.service.rule_jev.httpx.Client")
+def test_rule_jev_empty_applies_when_judges_exception_only(mock_client_class):
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"answers": {"exception_0": {"type": "noul", "noul": 0.9}}}
+    mock_client_class.return_value.post.return_value = response
+    client = RuleJevClient.from_config(RerankConfig(provider="jev", api_key="key", mode="noul"))
+
+    assert client is not None
+    rules = [
+        RuleJevInput("Global rule", "Require approval.", "", "Emergency recovery."),
+        RuleJevInput("Other global rule", "Preserve confidentiality.", "", ""),
+    ]
+    assert client.judge_rules("Emergency recovery.", rules) == [
+        RuleJevScore(applies_when=1.0, exception=0.9),
+        RuleJevScore(applies_when=1.0, exception=0.0),
+    ]
+    questions = mock_client_class.return_value.post.call_args.kwargs["json"]["questions"]
+    assert set(questions) == {"exception_0"}
+    client.close()
+
+
+@patch("openviking.service.rule_jev.httpx.Client")
+def test_rule_jev_unconditional_rules_do_not_request_judgment(mock_client_class):
+    client = RuleJevClient.from_config(RerankConfig(provider="jev", api_key="key", mode="noul"))
+    assert client is not None
+    assert client.judge_rules(
+        "Unrelated topic.", [RuleJevInput("Global rule", "Require approval.", "", "")]
+    ) == [RuleJevScore(applies_when=1.0, exception=0.0)]
+    mock_client_class.return_value.post.assert_not_called()
     client.close()

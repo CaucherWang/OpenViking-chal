@@ -161,10 +161,6 @@ Optional models and lifecycle settings for compiled Rules:
       "model": "jev-latest",
       "mode": "noul"
     },
-    "rule_matcher": {
-      "provider": "openai",
-      "model": "gpt-4o-mini"
-    },
     "compiler": {
       "provider": "openai",
       "model": "gpt-4o"
@@ -176,18 +172,36 @@ Optional models and lifecycle settings for compiled Rules:
 
 | Field | Type / values | Default | Purpose |
 |---|---|---|---|
-| `jev_rule_matcher` | rerank config / `null` | `null` | Jev Noul matcher for Case filtering and Rule applicability |
-| `rule_matcher` | VLM config / `null` | `null` | VLM fallback for Rule applicability |
+| `jev_rule_matcher` | rerank config / `null` | `null` | Jev Noul matcher for Scenario filtering and Rule applicability |
 | `compiler` | VLM config / `null` | `null` | Dedicated Rule compiler |
 | `compiler_context_window` | `0` or integer `>= 2048` | `0` | Compiler context window; `0` auto-detects with a conservative fallback |
-| `case_irrelevance_threshold` | number, `0.5`-`1.0` | `0.9` | Skip a Case only at or above this irrelevance probability |
-| `deleted_retention_days` | integer, `>= 1` | `30` | Days before deleted Rules are permanently removed |
-| `deleted_cleanup_interval_seconds` | integer, `>= 60` | `2592000` | Deleted-Rule cleanup interval |
-| `deleted_cleanup_enabled` | boolean | `true` | Enable periodic deleted-Rule cleanup |
+| `scenario_irrelevance_threshold` | number, `0.5`-`1.0` | `0.9` | Skip a Scenario only at or above this irrelevance probability |
+| `archived_retention_days` | integer, `>= 1` | `30` | Days before archived Rules are permanently removed |
+| `archived_cleanup_interval_seconds` | integer, `>= 60` | `2592000` | Archived-Rule cleanup interval |
+| `archived_cleanup_enabled` | boolean | `true` | Enable periodic archived-Rule cleanup |
 
-`jev_rule_matcher` must use provider `jev` in `noul` mode. Applicability matching
-falls back from Jev to `rule_matcher`, then to the account VLM; compilation falls
-back from `compiler` to the account VLM.
+Rule status is `active`, `paused`, or `archived`. `PAUSE` suspends retrieval without
+expiry; `ARCHIVE` starts retention from `archived_at`. `RESTORE` reactivates either
+state and clears that timestamp. Compilation considers active and paused Rules.
+
+Rules live directly in `memories/rules/<scenario_id>/`: `abstract.md` stores Scenario
+metadata and `<atomic_id>.md` stores each Rule. See
+[Rule Scenarios](../../../examples/rules/README.md) for the storage format.
+
+`jev_rule_matcher` must use provider `jev` in `noul` mode. When Jev is unconfigured,
+unavailable, fails, or returns invalid results, Scenario and Rule judgments pass
+the candidates without calling a VLM. Scenario diagnostics record `decision=pass`.
+Rules return `judge=pass`, a warning, and score `1.0` to pass the threshold; this score
+is not a model-estimated applicability probability. Agents still check applicability
+and exceptions against task facts. Compilation falls back from `compiler` to the
+account VLM. The former `rule_matcher` setting has been removed and is no longer read.
+
+Rule `applies_when` may be empty and defaults to an empty string. Empty means
+applicable in every situation unless `exception` holds. Candidates with neither an
+applicability condition nor an exception receive probability `1.0` directly.
+The Compiler prefers faithful, non-empty, decidable conditions derived from source
+objects, operations, prerequisites, and scenarios. It must not invent triggers or
+discard source restrictions. Empty does not mean unknown or inapplicable.
 
 ### `rerank`
 

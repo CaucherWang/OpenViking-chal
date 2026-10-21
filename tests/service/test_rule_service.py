@@ -11,17 +11,17 @@ from openviking.server.identity import RequestContext, Role
 from openviking.service.rule_jev import RuleJevScore
 from openviking.service.rule_resource_ingest import AddResourceRequest
 from openviking.service.rule_service import (
-    CASE_SCHEMA,
     RULE_SCHEMA,
-    RuleCaseRef,
+    SCENARIO_SCHEMA,
     RuleCompilePlan,
     RuleCompileRequest,
     RuleMutation,
     RuleRecord,
+    RuleScenarioRef,
     RuleSearchRequest,
     RuleService,
-    StoredCase,
     StoredRule,
+    StoredScenario,
     _build_material_batches,
     _render_markdown,
     _render_rules,
@@ -33,7 +33,6 @@ from openviking_cli.exceptions import (
     InvalidArgumentError,
     NotFoundError,
     ProcessingError,
-    UnavailableError,
     VLMFailedError,
 )
 from openviking_cli.session.user_id import UserIdentifier
@@ -71,14 +70,23 @@ def test_rule_record_is_an_implicit_user_constraint():
     }.isdisjoint(dumped)
     assert record.content == "Ask for confirmation before deleting files."
     assert record.exception == "when the user already explicitly confirmed this deletion"
-    assert "rule_text" not in dumped
     assert RuleRecord.model_validate({**dumped, "confidence": "high"}).confidence == "high"
 
 
-@pytest.mark.parametrize("applies_when", ["", " ", "none", "(none)", "[]"])
-def test_rule_record_requires_concrete_applies_when(applies_when):
+@pytest.mark.parametrize("applies_when", ["none", "(none)", "[]"])
+def test_rule_record_rejects_placeholder_applies_when(applies_when):
     with pytest.raises(ValueError, match="applies_when"):
         RuleRecord.model_validate({**_record().model_dump(), "applies_when": applies_when})
+
+
+@pytest.mark.parametrize("applies_when", ["", " \n"])
+def test_rule_record_accepts_empty_applies_when(applies_when):
+    record = RuleRecord.model_validate({**_record().model_dump(), "applies_when": applies_when})
+    assert record.applies_when == ""
+    assert record.exception == _record().exception
+    dumped = record.model_dump()
+    del dumped["applies_when"]
+    assert RuleRecord.model_validate(dumped).applies_when == ""
 
 
 def test_compile_prompt_does_not_expose_memory_preference_fields():
@@ -86,7 +94,7 @@ def test_compile_prompt_does_not_expose_memory_preference_fields():
     prompt = RuleService._render_compile_prompt(
         instruction="Always confirm deletion.",
         source_text="",
-        case_data=[],
+        scenario_data=[],
         rule_data=[],
     )
 
@@ -94,7 +102,6 @@ def test_compile_prompt_does_not_expose_memory_preference_fields():
     assert '"content": "complete actionable constraint"' in prompt
     assert '"exception": "explicit exceptions or empty"' in prompt
     assert '"condition":' not in prompt
-    assert '"rule_text":' not in prompt
     assert '"type": "preference' not in prompt
     assert '"domain":' not in prompt
     assert '"scope":' not in prompt
@@ -103,7 +110,7 @@ def test_compile_prompt_does_not_expose_memory_preference_fields():
     assert "Infer the single semantic target" in prompt
     assert "use UNCERTAIN instead of" in prompt
     assert "conditional branches into one Rule" in prompt
-    assert "Only NEW may include a non-null `case`" in prompt
+    assert "Only NEW may include a non-null `scenario`" in prompt
     assert "SUPERSEDE" not in prompt
     assert "SPLIT" not in prompt
     assert '"children":' not in prompt
@@ -111,6 +118,9 @@ def test_compile_prompt_does_not_expose_memory_preference_fields():
     assert f'"{removed_comparison_field}":' not in prompt
     assert "internally compare it" in prompt
     assert '"carried_over":' in prompt
+    assert "Prefer a faithful, non-empty" in prompt
+    assert "Never invent a trigger" in prompt
+    assert "Empty means the Rule applies in every situation" in prompt
 
 
 def test_rule_mutations_are_flat_and_replace_has_one_target():
@@ -157,53 +167,14 @@ def test_rule_mutations_are_flat_and_replace_has_one_target():
 
 
 @pytest.mark.asyncio
-async def test_load_rule_accepts_legacy_rule_text_frontmatter():
-    uri = "viking://user/alice/memories/rules/items/legacy.md"
-    metadata = {
-        "schema": RULE_SCHEMA,
-        "atomic_id": "legacy",
-        "revision": 1,
-        "status": "active",
-        "case_id": "file-operations",
-        "source_uris": [],
-        "evidence": ["confirm deletion"],
-        "superseded_by": [],
-        "updated_at": "",
-        "name": "legacy",
-        "description": "Legacy deletion constraint.",
-        "domain": "tools",
-        "condition": "",
-        "confidence": "high",
-        "rule_text": "Confirm before deleting files.",
-        "applies_when": "when deleting files",
-    }
-    markdown = f"---\n{yaml.safe_dump(metadata, sort_keys=False)}---\n\nLegacy body.\n"
-    service = RuleService()
-    service.set_dependencies(
-        fs=SimpleNamespace(read=AsyncMock(return_value=markdown)),
-        resources=SimpleNamespace(),
-        search=SimpleNamespace(),
-        vlm_resolver=SimpleNamespace(),
-        rules_config=None,
-    )
-
-    rule = await service._load_rule(uri, _ctx())
-
-    assert rule.record.content == "Confirm before deleting files."
-    assert rule.record.confidence == "high"
-    assert rule.record.exception == ""
-    assert "condition" not in rule.record.model_dump()
-
-
-@pytest.mark.asyncio
-async def test_load_rule_rejects_missing_applies_when():
-    uri = "viking://user/alice/memories/rules/items/invalid.md"
+async def test_load_rule_accepts_missing_applies_when():
+    uri = "viking://user/alice/memories/rules/file-operations/invalid.md"
     metadata = {
         "schema": RULE_SCHEMA,
         "atomic_id": "invalid",
         "revision": 1,
         "status": "active",
-        "case_id": "file-operations",
+        "scenario_id": "file-operations",
         "source_uris": [],
         "evidence": [],
         "updated_at": "",
@@ -222,59 +193,28 @@ async def test_load_rule_rejects_missing_applies_when():
         rules_config=None,
     )
 
-    with pytest.raises(ValueError, match="applies_when"):
-        await service._load_rule(uri, _ctx())
-
-
-@pytest.mark.asyncio
-async def test_load_rule_maps_legacy_superseded_status_to_deleted():
-    uri = "viking://user/alice/memories/rules/items/legacy.md"
-    metadata = {
-        "schema": RULE_SCHEMA,
-        "atomic_id": "legacy",
-        "revision": 2,
-        "status": "superseded",
-        "case_id": "file-operations",
-        "source_uris": [],
-        "evidence": ["replace old rule"],
-        "superseded_by": ["replacement"],
-        "updated_at": "2026-09-01T00:00:00+00:00",
-        **_record("legacy").model_dump(exclude={"body"}),
-    }
-    markdown = f"---\n{yaml.safe_dump(metadata, sort_keys=False)}---\n\nLegacy body.\n"
-    service = RuleService()
-    service.set_dependencies(
-        fs=SimpleNamespace(read=AsyncMock(return_value=markdown)),
-        resources=SimpleNamespace(),
-        search=SimpleNamespace(),
-        vlm_resolver=SimpleNamespace(),
-        rules_config=None,
-    )
-
     rule = await service._load_rule(uri, _ctx())
-
-    assert rule.status == "deleted"
-    assert rule.deleted_at == metadata["updated_at"]
+    assert rule.record.applies_when == ""
 
 
 def _stored_rule(
     atomic_id: str,
     *,
-    case_id: str = "file-operations",
-    status: Literal["active", "archived", "deleted"] = "active",
-    deleted_at: str | None = None,
+    scenario_id: str = "file-operations",
+    status: Literal["active", "paused", "archived"] = "active",
+    archived_at: str | None = None,
 ) -> StoredRule:
     record = _record(atomic_id)
-    uri = f"viking://user/alice/memories/rules/items/{atomic_id}.md"
+    uri = f"viking://user/alice/memories/rules/{scenario_id}/{atomic_id}.md"
     return StoredRule(
         schema=RULE_SCHEMA,
         atomic_id=atomic_id,
         revision=1,
         status=status,
-        case_id=case_id,
+        scenario_id=scenario_id,
         source_uris=[],
         evidence=["delete files"],
-        deleted_at=deleted_at,
+        archived_at=archived_at,
         record=record,
         uri=uri,
         content=record.body,
@@ -285,6 +225,15 @@ class _FS:
     def __init__(self):
         self.batch = None
         self.batch_task_context = None
+        self.documents = {}
+
+    async def glob(self, pattern, ctx, uri):
+        return {"matches": [path for path in self.documents if path.startswith(f"{uri}/")]}
+
+    async def read(self, uri, ctx):
+        if uri not in self.documents:
+            raise NotFoundError(uri, "file")
+        return self.documents[uri]
 
     async def batch_write(self, **kwargs):
         self.batch_task_context = get_task_context()
@@ -302,7 +251,7 @@ class _CleanupFS:
         self.removed: list[str] = []
 
     async def glob(self, pattern, ctx, uri):
-        assert pattern == "*.md"
+        assert pattern == "*/*.md"
         return {"matches": sorted(path for path in self.documents if path.startswith(f"{uri}/"))}
 
     async def read(self, uri, ctx):
@@ -322,9 +271,8 @@ class _CleanupFS:
 
 
 @pytest.mark.asyncio
-async def test_rule_models_prefer_dedicated_vlm_configs():
+async def test_rule_compiler_prefers_dedicated_vlm_config():
     compiler = VLMConfig(provider="litellm", model="rule-compiler")
-    matcher = VLMConfig(provider="litellm", model="rule-matcher")
     resolver = SimpleNamespace(get_vlm=AsyncMock())
     service = RuleService()
     service.set_dependencies(
@@ -332,11 +280,10 @@ async def test_rule_models_prefer_dedicated_vlm_configs():
         resources=SimpleNamespace(),
         search=SimpleNamespace(),
         vlm_resolver=resolver,
-        rules_config=RulesConfig(compiler=compiler, rule_matcher=matcher),
+        rules_config=RulesConfig(compiler=compiler),
     )
 
     assert await service._compiler_vlm(_ctx()) is compiler
-    assert await service._rule_matcher_vlm(_ctx()) is matcher
     resolver.get_vlm.assert_not_awaited()
 
 
@@ -350,12 +297,11 @@ async def test_empty_rule_model_configs_use_account_default_vlm():
         resources=SimpleNamespace(),
         search=SimpleNamespace(),
         vlm_resolver=resolver,
-        rules_config=RulesConfig(compiler=VLMConfig(), rule_matcher=VLMConfig()),
+        rules_config=RulesConfig(compiler=VLMConfig()),
     )
 
     assert await service._compiler_vlm(_ctx()) is default_vlm
-    assert await service._rule_matcher_vlm(_ctx()) is default_vlm
-    assert resolver.get_vlm.await_count == 2
+    assert resolver.get_vlm.await_count == 1
 
 
 @pytest.mark.parametrize(
@@ -395,7 +341,7 @@ def test_compiler_prompt_limit_uses_context_metadata(rules_config, vlm, expected
 
 
 @pytest.mark.asyncio
-async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
+async def test_jev_rule_matcher_scores_independent_applicability(monkeypatch):
     rules = [
         _stored_rule("rule-a").model_copy(
             update={"content": "---\ncondition: legacy hidden value\n---\n"}
@@ -445,11 +391,8 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
         vlm_resolver=SimpleNamespace(get_vlm=AsyncMock()),
         rules_config=RulesConfig(
             jev_rule_matcher=RerankConfig(provider="jev", api_key="key", mode="noul"),
-            rule_matcher=VLMConfig(provider="litellm", model="rule-matcher"),
         ),
     )
-    vlm_score = AsyncMock(side_effect=AssertionError("VLM matcher must not run"))
-    monkeypatch.setattr(service, "_score_rules_with_vlm", vlm_score)
     monkeypatch.setattr(
         "openviking.service.rule_service.RuleJevClient",
         SimpleNamespace(from_config=lambda config: client),
@@ -458,7 +401,6 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
     scores, backend, warning = await service._score_rules(
         "delete generated files",
         rules,
-        _ctx(),
     )
 
     assert scores == pytest.approx([0.9, 0.8, 0.0, 0.95])
@@ -466,11 +408,35 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
     assert warning is None
     assert client.closed is True
     assert len(client.calls) == 1
-    vlm_score.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_jev_rule_matcher_failure_falls_back_to_vlm(monkeypatch):
+async def test_jev_global_rule_exception_vetoes_default_applicability(monkeypatch):
+    client = SimpleNamespace(
+        judge_rules=lambda task, inputs: [
+            RuleJevScore(applies_when=1.0, exception=probability)
+            for probability in (0.9, 0.4, 0.65)
+        ],
+        close=lambda: None,
+    )
+    monkeypatch.setattr(
+        "openviking.service.rule_service.RuleJevClient",
+        SimpleNamespace(from_config=lambda config: client),
+    )
+    rules = [
+        _stored_rule(f"global-{index}").model_copy(
+            update={"record": _record().model_copy(update={"applies_when": ""})}
+        )
+        for index in range(3)
+    ]
+    scores = await RuleService()._score_rules_with_jev(
+        "Any task", rules, None, exception_veto_threshold=0.65
+    )
+    assert scores == [0.0, 1.0, 0.0]
+
+
+@pytest.mark.asyncio
+async def test_jev_rule_matcher_failure_passes_all_candidates(monkeypatch):
     class _FailingJevClient:
         def __init__(self):
             self.closed = False
@@ -490,11 +456,8 @@ async def test_jev_rule_matcher_failure_falls_back_to_vlm(monkeypatch):
         vlm_resolver=SimpleNamespace(get_vlm=AsyncMock()),
         rules_config=RulesConfig(
             jev_rule_matcher=RerankConfig(provider="jev", api_key="key", mode="noul"),
-            rule_matcher=VLMConfig(provider="litellm", model="rule-matcher"),
         ),
     )
-    vlm_score = AsyncMock(return_value=[0.7])
-    monkeypatch.setattr(service, "_score_rules_with_vlm", vlm_score)
     monkeypatch.setattr(
         "openviking.service.rule_service.RuleJevClient",
         SimpleNamespace(from_config=lambda config: client),
@@ -507,57 +470,146 @@ async def test_jev_rule_matcher_failure_falls_back_to_vlm(monkeypatch):
                 update={"record": _record("rule-a").model_copy(update={"exception": ""})}
             )
         ],
-        _ctx(),
     )
 
-    assert scores == [0.7]
-    assert backend == "vlm"
-    assert warning == "Jev Noul was unavailable; VLM fallback was used."
+    assert scores == [1.0]
+    assert backend == "pass"
+    assert "passed without judgment" in warning
     assert client.closed is True
-    vlm_score.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_vlm_rule_matcher_batches_without_omitting_rules(monkeypatch):
+@pytest.mark.parametrize(
+    "response",
+    [None, [], [RuleJevScore(applies_when=float("nan"), exception=0.0)], ["malformed"]],
+)
+async def test_invalid_jev_rule_responses_pass_all_rules_without_loading_vlm(monkeypatch, response):
     service = RuleService()
-    rules = [_stored_rule(f"rule-{index}") for index in range(45)]
-    score_batch = AsyncMock(side_effect=lambda _task, batch, _ctx: [0.9] * len(batch))
-    monkeypatch.setattr(service, "_score_rule_batch_with_vlm", score_batch)
-
-    scores = await service._score_rules_with_vlm("validate rules", rules, _ctx())
-
-    assert scores == [0.9] * len(rules)
-    assert [len(call.args[1]) for call in score_batch.await_args_list] == [20, 20, 5]
+    resolver = SimpleNamespace(get_vlm=AsyncMock(side_effect=AssertionError("Unexpected VLM")))
+    service.set_dependencies(
+        fs=SimpleNamespace(),
+        resources=SimpleNamespace(),
+        search=SimpleNamespace(),
+        vlm_resolver=resolver,
+        rules_config=RulesConfig(
+            jev_rule_matcher=RerankConfig(provider="jev", api_key="key", mode="noul"),
+        ),
+    )
+    client = SimpleNamespace(judge_rules=lambda *_: response, close=lambda: None)
+    monkeypatch.setattr(
+        "openviking.service.rule_service.RuleJevClient",
+        SimpleNamespace(from_config=lambda _: client),
+    )
+    rules = [_stored_rule("first"), _stored_rule("second")]
+    # For a malformed single result, test its contents as well as length validation.
+    if response and len(response) == 1:
+        response = response * 2
+    scores, backend, warning = await service._score_rules("task", rules)
+    assert scores == [1.0, 1.0]
+    assert backend == "pass"
+    assert "passed without judgment" in warning
+    resolver.get_vlm.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_vlm_rule_matcher_judges_applicability_not_compliance(monkeypatch):
-    vlm = SimpleNamespace(
-        get_completion_async=AsyncMock(
-            return_value='{"scores": [{"index": 0, "probability": 0.9}]}'
+@pytest.mark.parametrize("rules_config", [None, RulesConfig()])
+async def test_missing_jev_config_passes_rules_without_reading_vlm_config(rules_config):
+    service = RuleService()
+    service._rules_config = rules_config
+    rules = [_stored_rule(f"rule-{index}") for index in range(45)]
+    scores, backend, warning = await service._score_rules("task", rules)
+    assert scores == [1.0] * len(rules)
+    assert backend == "pass"
+    assert "passed without judgment" in warning
+
+
+@pytest.mark.asyncio
+async def test_search_passes_all_loaded_rules_at_threshold_one_when_jev_is_missing(monkeypatch):
+    service = RuleService()
+    service.set_dependencies(
+        fs=SimpleNamespace(),
+        resources=SimpleNamespace(),
+        search=SimpleNamespace(),
+        vlm_resolver=None,
+    )
+    scenario = StoredScenario(
+        schema=SCENARIO_SCHEMA,
+        scenario_id="file-operations",
+        name="Files",
+        description="File constraints.",
+        uri="viking://user/alice/memories/rules/file-operations/abstract.md",
+        content="",
+    )
+    rules = [_stored_rule("first"), _stored_rule("second")]
+    monkeypatch.setattr(service, "_recall_scenarios", AsyncMock(return_value=[scenario]))
+    monkeypatch.setattr(service, "_load_rules_for_scenarios", AsyncMock(return_value=rules))
+    result = await service.search_rules(
+        RuleSearchRequest(task_context="delete files", rule_probability_threshold=1.0),
+        ctx=_ctx(),
+    )
+    assert {rule["atomic_id"] for rule in result["rules"]} == {"first", "second"}
+    assert all(rule["probability"] == 1.0 for rule in result["rules"])
+    assert result["judge"] == "pass"
+    assert "passed without judgment" in result["warning"]
+    assert result["scenario_selection"]["passed_scenario_ids"] == ["file-operations"]
+    assert result["delivery"]["complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_jev_rule_client_initialization_failure_passes_rules(monkeypatch):
+    service = RuleService()
+    service._rules_config = RulesConfig(
+        jev_rule_matcher=RerankConfig(provider="jev", api_key="key", mode="noul"),
+    )
+
+    def fail_initialization(_config):
+        raise RuntimeError("init failed")
+
+    monkeypatch.setattr(
+        "openviking.service.rule_service.RuleJevClient",
+        SimpleNamespace(from_config=fail_initialization),
+    )
+    scores, backend, warning = await service._score_rules("task", [_stored_rule("first")])
+    assert scores == [1.0] and backend == "pass"
+    assert "passed without judgment" in warning
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initialization", ["missing", "unavailable", "raises"])
+async def test_jev_scenario_initialization_passes_every_candidate(monkeypatch, initialization):
+    service = RuleService()
+    service._rules_config = RulesConfig(
+        jev_rule_matcher=(
+            None
+            if initialization == "missing"
+            else RerankConfig(provider="jev", api_key="key", mode="noul")
         )
     )
-    service = RuleService()
-    monkeypatch.setattr(service, "_rule_matcher_vlm", AsyncMock(return_value=vlm))
 
-    scores = await service._score_rule_batch_with_vlm(
-        "The requirement is satisfied and no violation was found.",
-        [_stored_rule("confirm-delete")],
-        _ctx(),
-    )
+    def factory(*_args, **_kwargs):
+        if initialization == "raises":
+            raise RuntimeError("init failed")
+        return None
 
-    assert scores == [0.9]
-    prompt = vlm.get_completion_async.await_args.kwargs["prompt"]
-    assert "Evaluate only whether each saved Rule applies" in prompt
-    assert "Consider applies_when" in prompt
-    assert '"condition":' not in prompt
-    assert "Do not judge whether the object passes or fails the Rule" in prompt
-    assert "no violation is found" in prompt
-    assert "remains applicable" in prompt
+    monkeypatch.setattr("openviking.service.rule_service.create_rule_jev_judge", factory)
+    scenarios = [
+        StoredScenario(
+            schema=SCENARIO_SCHEMA,
+            scenario_id="example",
+            name="Example",
+            description="Example.",
+            uri="viking://user/alice/memories/rules/example/abstract.md",
+            content="",
+        )
+    ]
+    passed, report = await service._filter_unrelated_scenarios_with_jev("task", scenarios)
+    assert passed == scenarios
+    assert report["skipped_scenario_ids"] == []
+    assert all(item["decision"] == "pass" for item in report["decisions"])
 
 
 @pytest.mark.asyncio
-async def test_jev_case_filter_skips_only_high_confidence_completely_unrelated(monkeypatch):
+async def test_jev_scenario_filter_skips_only_high_confidence_completely_unrelated(monkeypatch):
     class _JevClient:
         def __init__(self):
             self.closed = False
@@ -575,30 +627,29 @@ async def test_jev_case_filter_skips_only_high_confidence_completely_unrelated(m
     service = RuleService()
     service._rules_config = RulesConfig(
         jev_rule_matcher=RerankConfig(provider="jev", api_key="key", mode="noul"),
-        case_irrelevance_threshold=0.9,
+        scenario_irrelevance_threshold=0.9,
     )
     monkeypatch.setattr(
         "openviking.service.rule_service.create_rule_jev_judge",
         lambda config, **kwargs: judge_config.update(kwargs) or client,
     )
-    cases = [
-        StoredCase(
-            schema=CASE_SCHEMA,
-            case_id=case_id,
-            name=case_id,
-            description=f"Scenario for {case_id}",
-            rule_uris=[],
-            uri=f"viking://user/alice/memories/rules/cases/{case_id}.md",
-            content=f"# {case_id}\n\nScenario for {case_id}",
+    scenarios = [
+        StoredScenario(
+            schema=SCENARIO_SCHEMA,
+            scenario_id=scenario_id,
+            name=scenario_id,
+            description=f"Scenario for {scenario_id}",
+            uri=f"viking://user/alice/memories/rules/{scenario_id}/abstract.md",
+            content=f"# {scenario_id}\n\nScenario for {scenario_id}",
         )
-        for case_id in ("unrelated", "relevant", "uncertain")
+        for scenario_id in ("unrelated", "relevant", "uncertain")
     ]
 
-    passed, report = await service._filter_unrelated_cases_with_jev("current task", cases)
+    passed, report = await service._filter_unrelated_scenarios_with_jev("current task", scenarios)
 
-    assert [case.case_id for case in passed] == ["relevant", "uncertain"]
-    assert report["skipped_case_ids"] == ["unrelated"]
-    assert report["passed_case_ids"] == ["relevant", "uncertain"]
+    assert [scenario.scenario_id for scenario in passed] == ["relevant", "uncertain"]
+    assert report["skipped_scenario_ids"] == ["unrelated"]
+    assert report["passed_scenario_ids"] == ["relevant", "uncertain"]
     assert report["irrelevance_threshold"] == 0.9
     assert client.call is not None
     assert "completely unrelated" in judge_config["question"]
@@ -607,10 +658,11 @@ async def test_jev_case_filter_skips_only_high_confidence_completely_unrelated(m
 
 
 @pytest.mark.asyncio
-async def test_jev_case_filter_passes_all_cases_when_judgment_fails(monkeypatch):
+@pytest.mark.parametrize("response", [None, [], 0.9, [float("nan")], [True]])
+async def test_jev_scenario_filter_passes_all_scenarios_when_judgment_fails(monkeypatch, response):
     class _FailingJevClient:
         def rerank_batch(self, query, documents):
-            return None
+            return response
 
         def close(self):
             pass
@@ -623,28 +675,29 @@ async def test_jev_case_filter_passes_all_cases_when_judgment_fails(monkeypatch)
         "openviking.service.rule_service.create_rule_jev_judge",
         lambda config, **kwargs: _FailingJevClient(),
     )
-    cases = [
-        StoredCase(
-            schema=CASE_SCHEMA,
-            case_id="uncertain",
+    scenarios = [
+        StoredScenario(
+            schema=SCENARIO_SCHEMA,
+            scenario_id="uncertain",
             name="Uncertain",
             description="Possibly relevant.",
-            rule_uris=[],
-            uri="viking://user/alice/memories/rules/cases/uncertain.md",
+            uri="viking://user/alice/memories/rules/uncertain/abstract.md",
             content="# Uncertain\n\nPossibly relevant.",
         )
     ]
 
-    passed, report = await service._filter_unrelated_cases_with_jev("current task", cases)
+    passed, report = await service._filter_unrelated_scenarios_with_jev("current task", scenarios)
 
-    assert passed == cases
-    assert report["skipped_case_ids"] == []
-    assert report["decisions"][0]["reason"] == "jev_unavailable_or_invalid"
-    assert "warning" in report
+    assert passed == scenarios
+    assert report["skipped_scenario_ids"] == []
+    assert report["decisions"][0]["reason"] in {
+        "jev_unavailable_or_invalid",
+        "invalid_jev_score",
+    }
 
 
 @pytest.mark.asyncio
-async def test_apply_new_rule_writes_markdown_item_and_case():
+async def test_apply_new_rule_writes_markdown_item_and_scenario():
     fs = _FS()
     service = RuleService()
     service.set_dependencies(
@@ -659,8 +712,8 @@ async def test_apply_new_rule_writes_markdown_item_and_case():
             RuleMutation(
                 operation="NEW",
                 record=_record(),
-                case=RuleCaseRef(
-                    case_id="destructive-file-operations",
+                scenario=RuleScenarioRef(
+                    scenario_id="destructive-file-operations",
                     name="Destructive file operations",
                     description="Rules for operations that remove or overwrite files.",
                 ),
@@ -678,7 +731,7 @@ async def test_apply_new_rule_writes_markdown_item_and_case():
     ):
         result = await service._apply_plan(
             plan,
-            existing_cases=[],
+            existing_scenarios=[],
             existing_rules=[],
             source_uris=["viking://user/alice/resources/rules"],
             ctx=_ctx(),
@@ -690,19 +743,18 @@ async def test_apply_new_rule_writes_markdown_item_and_case():
     assert fs.batch["root_uri"] == "viking://user/alice/memories/rules"
     assert fs.batch["wait"] is False
     by_uri = {operation["uri"]: operation["content"] for operation in fs.batch["operations"]}
-    rule_uri = "viking://user/alice/memories/rules/items/confirm-delete.md"
-    case_uri = "viking://user/alice/memories/rules/cases/destructive-file-operations.md"
+    rule_uri = "viking://user/alice/memories/rules/destructive-file-operations/confirm-delete.md"
+    scenario_uri = "viking://user/alice/memories/rules/destructive-file-operations/abstract.md"
     rule_frontmatter = yaml.safe_load(by_uri[rule_uri].split("---", 2)[1])
-    case_frontmatter = yaml.safe_load(by_uri[case_uri].split("---", 2)[1])
+    scenario_frontmatter = yaml.safe_load(by_uri[scenario_uri].split("---", 2)[1])
     assert rule_frontmatter["schema"] == RULE_SCHEMA
     assert rule_frontmatter["status"] == "active"
     assert rule_frontmatter["source_uris"] == ["viking://user/alice/resources/rules"]
     assert rule_frontmatter["confidence"] == "user"
     assert rule_frontmatter["content"] == "Ask for confirmation before deleting files."
-    assert "rule_text" not in rule_frontmatter
     assert {"type", "domain", "scope", "scope_anchor"}.isdisjoint(rule_frontmatter)
-    assert case_frontmatter["schema"] == CASE_SCHEMA
-    assert case_frontmatter["rule_uris"] == [rule_uri]
+    assert scenario_frontmatter["schema"] == SCENARIO_SCHEMA
+    assert "rule_uris" not in scenario_frontmatter
 
 
 @pytest.mark.asyncio
@@ -717,14 +769,13 @@ async def test_replace_deletes_old_rule_and_creates_new_rule():
         rules_config=None,
     )
     old = _stored_rule("old-rule")
-    case = StoredCase(
-        schema=CASE_SCHEMA,
-        case_id=old.case_id,
+    scenario = StoredScenario(
+        schema=SCENARIO_SCHEMA,
+        scenario_id=old.scenario_id,
         name="File operations",
         description="Rules for file operations.",
-        rule_uris=[old.uri],
-        uri="viking://user/alice/memories/rules/cases/file-operations.md",
-        content="case",
+        uri="viking://user/alice/memories/rules/file-operations/abstract.md",
+        content="scenario",
     )
     plan = RuleCompilePlan(
         mutations=[
@@ -739,7 +790,7 @@ async def test_replace_deletes_old_rule_and_creates_new_rule():
 
     await service._apply_plan(
         plan,
-        existing_cases=[case],
+        existing_scenarios=[scenario],
         existing_rules=[old],
         source_uris=[],
         ctx=_ctx(),
@@ -747,16 +798,15 @@ async def test_replace_deletes_old_rule_and_creates_new_rule():
 
     by_uri = {operation["uri"]: operation["content"] for operation in fs.batch["operations"]}
     old_metadata = yaml.safe_load(by_uri[old.uri].split("---", 2)[1])
-    replacement_uri = "viking://user/alice/memories/rules/items/replacement.md"
+    replacement_uri = "viking://user/alice/memories/rules/file-operations/replacement.md"
     replacement_metadata = yaml.safe_load(by_uri[replacement_uri].split("---", 2)[1])
-    assert old_metadata["status"] == "deleted"
-    assert old_metadata["deleted_at"]
+    assert old_metadata["status"] == "archived"
+    assert old_metadata["archived_at"]
     assert replacement_metadata["status"] == "active"
-    assert "superseded_by" not in old_metadata
 
 
 @pytest.mark.asyncio
-async def test_update_reactivates_archived_rule():
+async def test_update_reactivates_paused_rule():
     fs = _FS()
     service = RuleService()
     service.set_dependencies(
@@ -766,15 +816,14 @@ async def test_update_reactivates_archived_rule():
         vlm_resolver=SimpleNamespace(),
         rules_config=None,
     )
-    archived = _stored_rule("archived-rule", status="archived")
-    case = StoredCase(
-        schema=CASE_SCHEMA,
-        case_id=archived.case_id,
+    paused = _stored_rule("paused-rule", status="paused")
+    scenario = StoredScenario(
+        schema=SCENARIO_SCHEMA,
+        scenario_id=paused.scenario_id,
         name="File operations",
         description="Rules for file operations.",
-        rule_uris=[archived.uri],
-        uri="viking://user/alice/memories/rules/cases/file-operations.md",
-        content="case",
+        uri="viking://user/alice/memories/rules/file-operations/abstract.md",
+        content="scenario",
     )
 
     await service._apply_plan(
@@ -782,26 +831,80 @@ async def test_update_reactivates_archived_rule():
             mutations=[
                 RuleMutation(
                     operation="UPDATE",
-                    target_ids=[archived.atomic_id],
-                    record=_record("archived-rule"),
-                    evidence_spans=["reassert archived rule"],
+                    target_ids=[paused.atomic_id],
+                    record=_record("paused-rule"),
+                    evidence_spans=["reassert paused rule"],
                 )
             ]
         ),
-        existing_cases=[case],
-        existing_rules=[archived],
+        existing_scenarios=[scenario],
+        existing_rules=[paused],
         source_uris=[],
         ctx=_ctx(),
     )
 
     by_uri = {operation["uri"]: operation["content"] for operation in fs.batch["operations"]}
-    metadata = yaml.safe_load(by_uri[archived.uri].split("---", 2)[1])
+    metadata = yaml.safe_load(by_uri[paused.uri].split("---", 2)[1])
     assert metadata["status"] == "active"
-    assert metadata["revision"] == archived.revision + 1
+    assert metadata["revision"] == paused.revision + 1
+    assert metadata["schema"] == RULE_SCHEMA
+    assert "archived_at" not in metadata
 
 
 @pytest.mark.asyncio
-async def test_delete_is_idempotent_and_restore_resets_deleted_at():
+@pytest.mark.parametrize("operation", ["PAUSE", "ARCHIVE"])
+async def test_pause_and_archive_have_distinct_storage_and_restore_semantics(operation):
+    fs = _FS()
+    service = RuleService()
+    service.set_dependencies(
+        fs=fs, resources=SimpleNamespace(), search=SimpleNamespace(), vlm_resolver=None
+    )
+    active = _stored_rule("lifecycle-rule")
+    scenario = StoredScenario(
+        schema=SCENARIO_SCHEMA,
+        scenario_id=active.scenario_id,
+        name="File operations",
+        description="Rules for file operations.",
+        uri="viking://user/alice/memories/rules/file-operations/abstract.md",
+        content="",
+    )
+    changed = await service._apply_plan(
+        RuleCompilePlan(
+            mutations=[RuleMutation(operation=operation, target_ids=[active.atomic_id])]
+        ),
+        existing_scenarios=[scenario],
+        existing_rules=[active],
+        source_uris=[],
+        ctx=_ctx(),
+    )
+    writes = {item["uri"]: item["content"] for item in fs.batch["operations"]}
+    fs.documents.update(writes)
+    stored = await service._load_rule(active.uri, _ctx())
+    assert stored.status == ("paused" if operation == "PAUSE" else "archived")
+    assert bool(stored.archived_at) == (operation == "ARCHIVE")
+    assert stored.revision == active.revision + 1
+    assert changed["operations"][0]["operation"] == operation
+    metadata = yaml.safe_load(writes[active.uri].split("---", 2)[1])
+    assert metadata["schema"] == RULE_SCHEMA
+
+    await service._apply_plan(
+        RuleCompilePlan(
+            mutations=[RuleMutation(operation="RESTORE", target_ids=[stored.atomic_id])]
+        ),
+        existing_scenarios=[scenario],
+        existing_rules=[stored],
+        source_uris=[],
+        ctx=_ctx(),
+    )
+    fs.documents.update({item["uri"]: item["content"] for item in fs.batch["operations"]})
+    restored = await service._load_rule(active.uri, _ctx())
+    assert restored.status == "active"
+    assert restored.archived_at is None
+    assert restored.revision == stored.revision + 1
+
+
+@pytest.mark.asyncio
+async def test_archive_is_idempotent_and_restore_resets_archived_at():
     service = RuleService()
     service.set_dependencies(
         fs=_FS(),
@@ -810,35 +913,34 @@ async def test_delete_is_idempotent_and_restore_resets_deleted_at():
         vlm_resolver=SimpleNamespace(),
         rules_config=None,
     )
-    deleted_at = "2026-09-01T00:00:00+00:00"
-    deleted = _stored_rule("old-rule", status="deleted", deleted_at=deleted_at)
-    case = StoredCase(
-        schema=CASE_SCHEMA,
-        case_id=deleted.case_id,
+    archived_at = "2026-09-01T00:00:00+00:00"
+    archived = _stored_rule("old-rule", status="archived", archived_at=archived_at)
+    scenario = StoredScenario(
+        schema=SCENARIO_SCHEMA,
+        scenario_id=archived.scenario_id,
         name="File operations",
         description="Rules for file operations.",
-        rule_uris=[deleted.uri],
-        uri="viking://user/alice/memories/rules/cases/file-operations.md",
-        content="case",
+        uri="viking://user/alice/memories/rules/file-operations/abstract.md",
+        content="scenario",
     )
 
     unchanged = await service._apply_plan(
         RuleCompilePlan(
             mutations=[
                 RuleMutation(
-                    operation="DELETE",
-                    target_ids=[deleted.atomic_id],
-                    evidence_spans=["delete old rule"],
+                    operation="ARCHIVE",
+                    target_ids=[archived.atomic_id],
+                    evidence_spans=["archive old rule"],
                 )
             ]
         ),
-        existing_cases=[case],
-        existing_rules=[deleted],
+        existing_scenarios=[scenario],
+        existing_rules=[archived],
         source_uris=[],
         ctx=_ctx(),
         persist=False,
     )
-    assert unchanged["_rules"][0].deleted_at == deleted_at
+    assert unchanged["_rules"][0].archived_at == archived_at
     assert unchanged["written_uris"] == []
 
     restored = await service._apply_plan(
@@ -846,38 +948,38 @@ async def test_delete_is_idempotent_and_restore_resets_deleted_at():
             mutations=[
                 RuleMutation(
                     operation="RESTORE",
-                    target_ids=[deleted.atomic_id],
+                    target_ids=[archived.atomic_id],
                     evidence_spans=["restore old rule"],
                 )
             ]
         ),
-        existing_cases=[case],
-        existing_rules=[deleted],
+        existing_scenarios=[scenario],
+        existing_rules=[archived],
         source_uris=[],
         ctx=_ctx(),
         persist=False,
     )
     restored_rule = next(rule for rule in restored["_rules"] if rule.atomic_id == "old-rule")
     assert restored_rule.status == "active"
-    assert restored_rule.deleted_at is None
+    assert restored_rule.archived_at is None
 
 
 @pytest.mark.asyncio
-async def test_cleanup_removes_only_rules_deleted_for_full_retention_period():
+async def test_cleanup_removes_only_rules_archived_for_full_retention_period():
     now = datetime(2026, 10, 16, tzinfo=timezone.utc)
     old = _stored_rule(
-        "old-deleted",
-        status="deleted",
-        deleted_at=(now - timedelta(days=30)).isoformat(),
+        "old-archived",
+        status="archived",
+        archived_at=(now - timedelta(days=30)).isoformat(),
     )
     recent = _stored_rule(
-        "recent-deleted",
-        status="deleted",
-        deleted_at=(now - timedelta(days=29)).isoformat(),
+        "recent-archived",
+        status="archived",
+        archived_at=(now - timedelta(days=29)).isoformat(),
     )
-    archived = _stored_rule("archived", status="archived")
+    paused = _stored_rule("paused", status="paused")
     active = _stored_rule("active")
-    rules = [old, recent, archived, active]
+    rules = [old, recent, paused, active]
 
     def rule_markdown(rule: StoredRule) -> str:
         metadata = {
@@ -885,30 +987,29 @@ async def test_cleanup_removes_only_rules_deleted_for_full_retention_period():
             "atomic_id": rule.atomic_id,
             "revision": rule.revision,
             "status": rule.status,
-            "case_id": rule.case_id,
+            "scenario_id": rule.scenario_id,
             "source_uris": rule.source_uris,
             "evidence": rule.evidence,
             "updated_at": now.isoformat(),
             **rule.record.model_dump(exclude={"body"}),
         }
-        if rule.deleted_at:
-            metadata["deleted_at"] = rule.deleted_at
+        if rule.archived_at:
+            metadata["archived_at"] = rule.archived_at
         return _render_markdown(metadata, rule.record.body)
 
-    case_uri = "viking://user/alice/memories/rules/cases/file-operations.md"
-    case_content = _render_markdown(
+    scenario_uri = "viking://user/alice/memories/rules/file-operations/abstract.md"
+    scenario_content = _render_markdown(
         {
-            "schema": CASE_SCHEMA,
-            "case_id": "file-operations",
+            "schema": SCENARIO_SCHEMA,
+            "scenario_id": "file-operations",
             "name": "File operations",
             "description": "Rules for file operations.",
-            "rule_uris": [rule.uri for rule in rules],
             "updated_at": now.isoformat(),
         },
         "# File operations\n\n## Active rules",
     )
     documents = {rule.uri: rule_markdown(rule) for rule in rules}
-    documents[case_uri] = case_content
+    documents[scenario_uri] = scenario_content
     fs = _CleanupFS(documents)
     service = RuleService()
     service.set_dependencies(
@@ -916,23 +1017,23 @@ async def test_cleanup_removes_only_rules_deleted_for_full_retention_period():
         resources=SimpleNamespace(),
         search=SimpleNamespace(),
         vlm_resolver=SimpleNamespace(),
-        rules_config=RulesConfig(deleted_retention_days=30),
+        rules_config=RulesConfig(archived_retention_days=30),
     )
 
-    result = await service.cleanup_deleted_rules(ctx=_ctx(), now=now)
+    result = await service.cleanup_archived_rules(ctx=_ctx(), now=now)
 
     assert result["deleted"] == [old.uri]
     assert result["failed"] == []
     assert fs.removed == [old.uri]
-    case_metadata = yaml.safe_load(fs.documents[case_uri].split("---", 2)[1])
-    assert case_metadata["rule_uris"] == [recent.uri, archived.uri, active.uri]
+    scenario_metadata = yaml.safe_load(fs.documents[scenario_uri].split("---", 2)[1])
+    assert "rule_uris" not in scenario_metadata
     assert recent.uri in fs.documents
-    assert archived.uri in fs.documents
+    assert paused.uri in fs.documents
     assert active.uri in fs.documents
 
 
 @pytest.mark.asyncio
-async def test_apply_update_rejects_rule_outside_recalled_cases():
+async def test_apply_update_rejects_rule_outside_recalled_scenarios():
     service = RuleService()
     service.set_dependencies(
         fs=_FS(),
@@ -954,7 +1055,7 @@ async def test_apply_update_rejects_rule_outside_recalled_cases():
     with pytest.raises(InvalidArgumentError, match="unknown rule"):
         await service._apply_plan(
             plan,
-            existing_cases=[],
+            existing_scenarios=[],
             existing_rules=[],
             source_uris=[],
             ctx=_ctx(),
@@ -973,35 +1074,34 @@ async def test_search_returns_only_rules_above_independent_probability_threshold
         vlm_resolver=SimpleNamespace(),
         rules_config=None,
     )
-    case = StoredCase(
-        schema=CASE_SCHEMA,
-        case_id="file-operations",
+    scenario = StoredScenario(
+        schema=SCENARIO_SCHEMA,
+        scenario_id="file-operations",
         name="File operations",
         description="Rules for editing files.",
-        rule_uris=["viking://user/alice/memories/rules/items/a.md"],
-        uri="viking://user/alice/memories/rules/cases/file-operations.md",
-        content="case",
+        uri="viking://user/alice/memories/rules/file-operations/abstract.md",
+        content="scenario",
     )
     rules = [
         _stored_rule("a").model_copy(
             update={
-                "case_id": case.case_id,
-                "uri": case.rule_uris[0],
+                "scenario_id": scenario.scenario_id,
+                "uri": "viking://user/alice/memories/rules/file-operations/a.md",
                 "content": "complete rule a",
             }
         ),
         _stored_rule("b").model_copy(
             update={
-                "case_id": case.case_id,
+                "scenario_id": scenario.scenario_id,
                 "revision": 2,
                 "content": "complete rule b",
             }
         ),
     ]
-    recall_cases = AsyncMock(return_value=[case])
+    recall_scenarios = AsyncMock(return_value=[scenario])
     load_rules = AsyncMock(return_value=rules)
-    monkeypatch.setattr(service, "_recall_cases", recall_cases)
-    monkeypatch.setattr(service, "_load_rules_for_cases", load_rules)
+    monkeypatch.setattr(service, "_recall_scenarios", recall_scenarios)
+    monkeypatch.setattr(service, "_load_rules_for_scenarios", load_rules)
     monkeypatch.setattr(
         service,
         "_score_rules",
@@ -1028,9 +1128,9 @@ async def test_search_returns_only_rules_above_independent_probability_threshold
         "rule_count": 1,
         "rendered_chars": len(result["rendered"]),
     }
-    recall_cases.assert_awaited_once()
-    assert recall_cases.await_args.kwargs["limit"] is None
-    load_rules.assert_awaited_once_with([case], _ctx(), strict=True)
+    recall_scenarios.assert_awaited_once()
+    assert recall_scenarios.await_args.kwargs["limit"] is None
+    load_rules.assert_awaited_once_with([scenario], _ctx(), strict=True)
 
 
 @pytest.mark.asyncio
@@ -1065,11 +1165,11 @@ async def test_search_renders_all_rules_without_persistence_metadata(monkeypatch
         "_find_relevant_rules",
         AsyncMock(
             return_value=SimpleNamespace(
-                cases=[],
+                scenarios=[],
                 selected=[(rule, 0.9) for rule in rules],
                 judge="jev_noul",
                 warning=None,
-                case_selection=None,
+                scenario_selection=None,
             )
         ),
     )
@@ -1088,26 +1188,27 @@ async def test_search_renders_all_rules_without_persistence_metadata(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_two_stage_search_scores_all_rules_from_recalled_cases_without_rule_limit(
+async def test_two_stage_search_scores_all_rules_from_recalled_scenarios_without_rule_limit(
     monkeypatch,
 ):
     service = RuleService()
-    case = StoredCase(
-        schema=CASE_SCHEMA,
-        case_id="all-rules",
+    scenario = StoredScenario(
+        schema=SCENARIO_SCHEMA,
+        scenario_id="all-rules",
         name="All rules",
         description="Every active Rule is validated.",
-        rule_uris=[],
-        uri="viking://user/alice/memories/rules/cases/all-rules.md",
-        content="case",
+        uri="viking://user/alice/memories/rules/all-rules/abstract.md",
+        content="scenario",
     )
-    rules = [_stored_rule(f"rule-{index}", case_id=case.case_id) for index in range(125)]
-    recall_cases = AsyncMock(return_value=[case])
+    rules = [
+        _stored_rule(f"rule-{index}", scenario_id=scenario.scenario_id) for index in range(125)
+    ]
+    recall_scenarios = AsyncMock(return_value=[scenario])
     load_rules = AsyncMock(return_value=rules)
-    monkeypatch.setattr(service, "_recall_cases", recall_cases)
-    monkeypatch.setattr(service, "_load_rules_for_cases", load_rules)
+    monkeypatch.setattr(service, "_recall_scenarios", recall_scenarios)
+    monkeypatch.setattr(service, "_load_rules_for_scenarios", load_rules)
     monkeypatch.setattr(
-        service, "_score_rules", AsyncMock(return_value=([0.9] * len(rules), "vlm", None))
+        service, "_score_rules", AsyncMock(return_value=([0.9] * len(rules), "jev_noul", None))
     )
 
     matches = await service._find_relevant_rules(
@@ -1116,26 +1217,28 @@ async def test_two_stage_search_scores_all_rules_from_recalled_cases_without_rul
         rule_probability_threshold=0.65,
         allowed_statuses=frozenset({"active"}),
         strict_rule_loading=True,
-        filter_cases_with_jev=True,
+        filter_scenarios_with_jev=True,
     )
 
     assert len(matches.selected) == len(rules)
     assert [rule.atomic_id for rule, _ in matches.selected] == [rule.atomic_id for rule in rules]
-    recall_cases.assert_awaited_once()
-    load_rules.assert_awaited_once_with([case], _ctx(), strict=True)
+    recall_scenarios.assert_awaited_once()
+    load_rules.assert_awaited_once_with([scenario], _ctx(), strict=True)
 
 
 @pytest.mark.asyncio
-async def test_runtime_case_recall_searches_all_cases_before_thresholding(monkeypatch):
-    case_uris = [f"viking://user/alice/memories/rules/cases/case-{index}.md" for index in range(7)]
+async def test_runtime_scenario_recall_searches_all_scenarios_before_thresholding(monkeypatch):
+    scenario_uris = [
+        f"viking://user/alice/memories/rules/scenario-{index}/abstract.md" for index in range(7)
+    ]
     fs = SimpleNamespace(
-        stat=AsyncMock(),
-        glob=AsyncMock(return_value={"matches": case_uris}),
+        stat=AsyncMock(return_value={}),
+        glob=AsyncMock(return_value={"matches": scenario_uris}),
     )
     search = SimpleNamespace(
         find=AsyncMock(
             return_value={
-                "memories": [{"uri": uri} for uri in case_uris],
+                "memories": [{"uri": uri} for uri in scenario_uris],
                 "resources": [],
                 "skills": [],
             }
@@ -1149,38 +1252,45 @@ async def test_runtime_case_recall_searches_all_cases_before_thresholding(monkey
         vlm_resolver=SimpleNamespace(),
         rules_config=None,
     )
-    cases = [
-        StoredCase(
-            schema=CASE_SCHEMA,
-            case_id=f"case-{index}",
-            name=f"Case {index}",
+    scenarios = [
+        StoredScenario(
+            schema=SCENARIO_SCHEMA,
+            scenario_id=f"scenario-{index}",
+            name=f"Scenario {index}",
             description=f"Scenario {index}",
-            rule_uris=[],
             uri=uri,
-            content="case",
+            content="scenario",
         )
-        for index, uri in enumerate(case_uris)
+        for index, uri in enumerate(scenario_uris)
     ]
-    monkeypatch.setattr(service, "_load_case", AsyncMock(side_effect=cases))
+    monkeypatch.setattr(service, "_load_scenario", AsyncMock(side_effect=scenarios))
 
-    recalled = await service._recall_cases(
+    recalled = await service._recall_scenarios(
         "current task",
         ctx=_ctx(),
         limit=None,
         score_threshold=0.1,
     )
 
-    assert recalled == cases
-    assert search.find.await_args.kwargs["limit"] == len(case_uris)
+    assert recalled == scenarios
+    assert search.find.await_args.kwargs["limit"] == len(scenario_uris)
+    assert search.find.await_args.kwargs["target_uri"] == "viking://user/alice/memories/rules"
+    assert search.find.await_args.kwargs["filter"] == {
+        "op": "or",
+        "conds": [
+            {"op": "must", "field": "uri", "conds": [uri], "para": "-d=0"}
+            for uri in sorted(scenario_uris)
+        ],
+    }
 
 
 @pytest.mark.asyncio
-async def test_recalled_case_rule_loading_fails_closed_on_unreadable_rule(monkeypatch):
-    first_uri = "viking://user/alice/memories/rules/items/first.md"
-    broken_uri = "viking://user/alice/memories/rules/items/broken.md"
+async def test_recalled_scenario_rule_loading_fails_closed_on_unreadable_rule(monkeypatch):
+    first_uri = "viking://user/alice/memories/rules/file-operations/first.md"
+    broken_uri = "viking://user/alice/memories/rules/file-operations/broken.md"
     service = RuleService()
     service.set_dependencies(
-        fs=SimpleNamespace(),
+        fs=SimpleNamespace(glob=AsyncMock(return_value={"matches": [first_uri, broken_uri]})),
         resources=SimpleNamespace(),
         search=SimpleNamespace(),
         vlm_resolver=SimpleNamespace(),
@@ -1191,18 +1301,17 @@ async def test_recalled_case_rule_loading_fails_closed_on_unreadable_rule(monkey
         "_load_rule",
         AsyncMock(side_effect=[_stored_rule("first"), ValueError("invalid Rule document")]),
     )
-    case = StoredCase(
-        schema=CASE_SCHEMA,
-        case_id="file-operations",
+    scenario = StoredScenario(
+        schema=SCENARIO_SCHEMA,
+        scenario_id="file-operations",
         name="File operations",
         description="Rules for file operations.",
-        rule_uris=[first_uri, broken_uri],
-        uri="viking://user/alice/memories/rules/cases/file-operations.md",
-        content="case",
+        uri="viking://user/alice/memories/rules/file-operations/abstract.md",
+        content="scenario",
     )
 
-    with pytest.raises(ProcessingError, match="recalled Case references an unreadable Rule"):
-        await service._load_rules_for_cases([case], _ctx(), strict=True)
+    with pytest.raises(ProcessingError, match="recalled Scenario contains an unreadable Rule"):
+        await service._load_rules_for_scenarios([scenario], _ctx(), strict=True)
 
 
 def test_rule_renderer_keeps_an_oversized_rule_complete():
@@ -1216,13 +1325,16 @@ def test_rule_renderer_keeps_an_oversized_rule_complete():
     assert len(rendered) > 1_000
 
 
-def test_rule_renderer_omits_empty_exception():
-    record = _record("no-exception").model_copy(update={"exception": ""})
+@pytest.mark.parametrize("applies_when", ["when a task requires deleting files", ""])
+def test_rule_renderer_omits_empty_exception(applies_when):
+    record = _record("no-exception").model_copy(
+        update={"exception": "", "applies_when": applies_when}
+    )
     rule = _stored_rule("no-exception").model_copy(update={"record": record})
 
     rendered = _render_rules([(rule, 0.99)])
 
-    assert "Applies when: when a task requires deleting files" in rendered
+    assert f"Applies when: {applies_when or 'Every situation, except as stated below.'}" in rendered
     assert "Exception:" not in rendered
 
 
@@ -1285,20 +1397,19 @@ async def test_compile_uses_search_pipeline_to_select_existing_rules(monkeypatch
         vlm_resolver=SimpleNamespace(get_vlm=AsyncMock(return_value=compiler)),
         rules_config=None,
     )
-    case = StoredCase(
-        schema=CASE_SCHEMA,
-        case_id="file-operations",
+    scenario = StoredScenario(
+        schema=SCENARIO_SCHEMA,
+        scenario_id="file-operations",
         name="File operations",
         description="Rules for editing files.",
-        rule_uris=[],
-        uri="viking://user/alice/memories/rules/cases/file-operations.md",
-        content="case",
+        uri="viking://user/alice/memories/rules/file-operations/abstract.md",
+        content="scenario",
     )
     relevant = _stored_rule("relevant")
+    paused = _stored_rule("paused", status="paused")
     archived = _stored_rule("archived", status="archived")
-    deleted = _stored_rule("deleted", status="deleted")
     unrelated = _stored_rule("unrelated")
-    recall_cases = AsyncMock(return_value=[case])
+    recall_scenarios = AsyncMock(return_value=[scenario])
     score_rules = AsyncMock(return_value=([0.9, 0.8, 0.2], "jev_noul", None))
     build_plan = AsyncMock(
         return_value=RuleCompilePlan(
@@ -1317,11 +1428,11 @@ async def test_compile_uses_search_pipeline_to_select_existing_rules(monkeypatch
     )
     monkeypatch.setattr(service, "_ensure_rule_directories", AsyncMock())
     monkeypatch.setattr(service, "_collect_sources", AsyncMock(return_value=("", [])))
-    monkeypatch.setattr(service, "_recall_cases", recall_cases)
+    monkeypatch.setattr(service, "_recall_scenarios", recall_scenarios)
     monkeypatch.setattr(
         service,
-        "_load_rules_for_cases",
-        AsyncMock(return_value=[relevant, archived, deleted, unrelated]),
+        "_load_rules_for_scenarios",
+        AsyncMock(return_value=[relevant, paused, archived, unrelated]),
     )
     monkeypatch.setattr(service, "_score_rules", score_rules)
     monkeypatch.setattr(service, "_build_compile_plan", build_plan)
@@ -1333,41 +1444,14 @@ async def test_compile_uses_search_pipeline_to_select_existing_rules(monkeypatch
         task_id="rul_match",
     )
 
-    assert recall_cases.await_args.kwargs["limit"] == 5
-    assert recall_cases.await_args.kwargs["score_threshold"] == 0.1
+    assert recall_scenarios.await_args.kwargs["limit"] == 5
+    assert recall_scenarios.await_args.kwargs["score_threshold"] == 0.1
     assert score_rules.await_args.args[0] == "delete files"
-    assert score_rules.await_args.args[1] == [relevant, archived, unrelated]
+    assert score_rules.await_args.args[1] == [relevant, paused, unrelated]
     assert [rule.atomic_id for rule in build_plan.await_args.kwargs["rules"]] == [
         "relevant",
-        "archived",
+        "paused",
     ]
-
-
-@pytest.mark.asyncio
-async def test_search_raises_when_jev_and_vlm_are_both_unavailable(monkeypatch):
-    service = RuleService()
-    service.set_dependencies(
-        fs=SimpleNamespace(),
-        resources=SimpleNamespace(),
-        search=SimpleNamespace(),
-        vlm_resolver=SimpleNamespace(),
-        rules_config=None,
-    )
-    monkeypatch.setattr(
-        service,
-        "_score_rules_with_vlm",
-        AsyncMock(side_effect=RuntimeError("VLM unavailable")),
-    )
-
-    with pytest.raises(
-        UnavailableError,
-        match="rule applicability cannot be determined safely",
-    ):
-        await service._score_rules(
-            "delete a generated file",
-            [SimpleNamespace()],
-            _ctx(),
-        )
 
 
 def test_compile_request_requires_instruction_or_source():
@@ -1703,7 +1787,7 @@ def test_compile_plan_rejects_evidence_not_present_in_input():
             RuleMutation(
                 operation="NEW",
                 record=_record(),
-                case=RuleCaseRef(
+                scenario=RuleScenarioRef(
                     name="File operations",
                     description="Rules for editing files.",
                 ),
@@ -1741,16 +1825,16 @@ def test_compile_plan_requires_update_preservation_proof():
         )
 
 
-def test_compile_plan_allows_archived_rule_update_and_replace():
-    archived = _stored_rule("archived-rule", status="archived")
+def test_compile_plan_allows_paused_rule_update_and_replace():
+    paused = _stored_rule("paused-rule", status="paused")
     update = RuleCompilePlan(
         mutations=[
             RuleMutation(
                 operation="UPDATE",
-                target_ids=[archived.atomic_id],
-                record=_record("archived-rule"),
-                evidence_spans=["reassert archived rule"],
-                applicability_evidence=f"existing:{archived.atomic_id}",
+                target_ids=[paused.atomic_id],
+                record=_record("paused-rule"),
+                evidence_spans=["reassert paused rule"],
+                applicability_evidence=f"existing:{paused.atomic_id}",
                 carried_over={
                     "existing_requirements": [
                         "Ask for confirmation before deleting files.",
@@ -1763,24 +1847,41 @@ def test_compile_plan_allows_archived_rule_update_and_replace():
         mutations=[
             RuleMutation(
                 operation="REPLACE",
-                target_ids=[archived.atomic_id],
+                target_ids=[paused.atomic_id],
                 record=_record("replacement"),
-                evidence_spans=["replace archived rule"],
-                applicability_evidence="replace archived rule",
+                evidence_spans=["replace paused rule"],
+                applicability_evidence="replace paused rule",
             )
         ]
     )
 
     RuleService._validate_compile_plan(
         update,
-        material="reassert archived rule",
-        existing_rules=[archived],
+        material="reassert paused rule",
+        existing_rules=[paused],
     )
     RuleService._validate_compile_plan(
         replacement,
-        material="replace archived rule",
-        existing_rules=[archived],
+        material="replace paused rule",
+        existing_rules=[paused],
     )
+
+
+@pytest.mark.parametrize("exception", ["", "when the user already confirmed"])
+def test_compile_plan_empty_applies_when_still_requires_exception_evidence(exception):
+    mutation = RuleMutation(
+        operation="NEW",
+        record=_record().model_copy(update={"applies_when": "", "exception": exception}),
+        scenario=RuleScenarioRef(name="All tasks", description="Global constraints."),
+        evidence_spans=["Always confirm deletion."],
+    )
+    plan = RuleCompilePlan(mutations=[mutation])
+    material = "Always confirm deletion. Except when the user already confirmed."
+    if exception:
+        with pytest.raises(VLMFailedError, match="applicability_evidence"):
+            RuleService._validate_compile_plan(plan, material=material, existing_rules=[])
+        mutation.applicability_evidence = exception
+    RuleService._validate_compile_plan(plan, material=material, existing_rules=[])
 
 
 def test_compile_plan_rejects_unsupported_applicability():
@@ -1789,7 +1890,7 @@ def test_compile_plan_rejects_unsupported_applicability():
             RuleMutation(
                 operation="NEW",
                 record=_record(),
-                case=RuleCaseRef(
+                scenario=RuleScenarioRef(
                     name="File operations",
                     description="Rules for editing files.",
                 ),
@@ -1815,7 +1916,7 @@ async def test_compile_plan_repairs_semantically_invalid_response():
             {
                 "operation": "NEW",
                 "record": _record("duplicate").model_dump(),
-                "case": {
+                "scenario": {
                     "name": "File operations",
                     "description": "Rules for editing files.",
                 },
@@ -1842,7 +1943,7 @@ async def test_compile_plan_repairs_semantically_invalid_response():
     plan = await service._build_compile_plan(
         instruction="confirm before deleting files",
         source_text="",
-        cases=[],
+        scenarios=[],
         rules=[old],
         ctx=_ctx(),
         vlm=compiler,
@@ -1860,24 +1961,23 @@ async def test_compile_plan_repairs_semantically_invalid_response():
 async def test_compile_plan_rejects_oversized_prompt_without_trimming_state():
     service = RuleService()
     compiler = SimpleNamespace(get_completion_async=AsyncMock())
-    case = StoredCase(
-        schema=CASE_SCHEMA,
-        case_id="file-operations",
+    scenario = StoredScenario(
+        schema=SCENARIO_SCHEMA,
+        scenario_id="file-operations",
         name="File operations",
         description="Rules for editing files.",
-        rule_uris=[],
-        uri="viking://user/alice/memories/rules/cases/file-operations.md",
-        content="case",
+        uri="viking://user/alice/memories/rules/file-operations/abstract.md",
+        content="scenario",
     )
     rule = _stored_rule("existing-rule")
     full_prompt = service._render_compile_prompt(
         instruction="confirm before deleting files",
         source_text="",
-        case_data=[
+        scenario_data=[
             {
-                "case_id": case.case_id,
-                "name": case.name,
-                "description": case.description,
+                "scenario_id": scenario.scenario_id,
+                "name": scenario.name,
+                "description": scenario.description,
             }
         ],
         rule_data=[
@@ -1886,16 +1986,16 @@ async def test_compile_plan_rejects_oversized_prompt_without_trimming_state():
                 "atomic_id": rule.atomic_id,
                 "revision": rule.revision,
                 "status": rule.status,
-                "case_id": rule.case_id,
+                "scenario_id": rule.scenario_id,
             }
         ],
     )
 
-    with pytest.raises(InvalidArgumentError, match="refusing to omit existing cases or rules"):
+    with pytest.raises(InvalidArgumentError, match="refusing to omit existing scenarios or rules"):
         await service._build_compile_plan(
             instruction="confirm before deleting files",
             source_text="",
-            cases=[case],
+            scenarios=[scenario],
             rules=[rule],
             ctx=_ctx(),
             vlm=compiler,
@@ -1970,14 +2070,14 @@ async def test_compile_batches_sequentially_and_writes_once(monkeypatch):
         "_collect_sources",
         AsyncMock(return_value=("", [])),
     )
-    monkeypatch.setattr(service, "_recall_cases", AsyncMock(return_value=[]))
-    monkeypatch.setattr(service, "_load_rules_for_cases", AsyncMock(return_value=[]))
+    monkeypatch.setattr(service, "_recall_scenarios", AsyncMock(return_value=[]))
+    monkeypatch.setattr(service, "_load_rules_for_scenarios", AsyncMock(return_value=[]))
     prompt_token_limit = (
         estimate_text_tokens(
             service._render_compile_prompt(
                 instruction="",
                 source_text="",
-                case_data=[],
+                scenario_data=[],
                 rule_data=[],
             )
         )
@@ -2001,7 +2101,7 @@ async def test_compile_batches_sequentially_and_writes_once(monkeypatch):
                     {
                         "operation": "NEW",
                         "record": _record().model_dump(),
-                        "case": {
+                        "scenario": {
                             "name": "File operations",
                             "description": "Rules for editing files.",
                         },
@@ -2044,7 +2144,7 @@ async def test_compile_batches_sequentially_and_writes_once(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_compile_does_not_carry_deleted_rules_into_later_batches(monkeypatch):
+async def test_compile_does_not_carry_archived_rules_into_later_batches(monkeypatch):
     class _Tracker:
         update_stage = AsyncMock()
 
@@ -2058,15 +2158,14 @@ async def test_compile_does_not_carry_deleted_rules_into_later_batches(monkeypat
         vlm_resolver=SimpleNamespace(get_vlm=AsyncMock(return_value=compiler)),
         rules_config=None,
     )
-    archived = _stored_rule("archived-rule", status="archived")
-    case = StoredCase(
-        schema=CASE_SCHEMA,
-        case_id=archived.case_id,
+    paused = _stored_rule("paused-rule", status="paused")
+    scenario = StoredScenario(
+        schema=SCENARIO_SCHEMA,
+        scenario_id=paused.scenario_id,
         name="File operations",
         description="Rules for file operations.",
-        rule_uris=[archived.uri],
-        uri="viking://user/alice/memories/rules/cases/file-operations.md",
-        content="case",
+        uri="viking://user/alice/memories/rules/file-operations/abstract.md",
+        content="scenario",
     )
     monkeypatch.setattr(
         "openviking.service.rule_service.get_task_tracker",
@@ -2077,15 +2176,15 @@ async def test_compile_does_not_carry_deleted_rules_into_later_batches(monkeypat
     monkeypatch.setattr(service, "_compiler_prompt_token_limit", lambda _: 8_000)
     monkeypatch.setattr(
         "openviking.service.rule_service._build_material_batches",
-        lambda *args, **kwargs: [("replace archived rule", ""), ("second batch", "")],
+        lambda *args, **kwargs: [("replace paused rule", ""), ("second batch", "")],
     )
     monkeypatch.setattr(
         service,
         "_find_relevant_rules",
         AsyncMock(
             side_effect=[
-                SimpleNamespace(cases=[case], selected=[(archived, 0.9)]),
-                SimpleNamespace(cases=[], selected=[]),
+                SimpleNamespace(scenarios=[scenario], selected=[(paused, 0.9)]),
+                SimpleNamespace(scenarios=[], selected=[]),
             ]
         ),
     )
@@ -2098,9 +2197,9 @@ async def test_compile_does_not_carry_deleted_rules_into_later_batches(monkeypat
                 mutations=[
                     RuleMutation(
                         operation="REPLACE",
-                        target_ids=[archived.atomic_id],
+                        target_ids=[paused.atomic_id],
                         record=_record("replacement"),
-                        evidence_spans=["replace archived rule"],
+                        evidence_spans=["replace paused rule"],
                     )
                 ]
             )
@@ -2117,13 +2216,13 @@ async def test_compile_does_not_carry_deleted_rules_into_later_batches(monkeypat
     monkeypatch.setattr(service, "_build_compile_plan", build_plan)
 
     await service._compile(
-        RuleCompileRequest(instruction="replace archived rule"),
+        RuleCompileRequest(instruction="replace paused rule"),
         ctx=_ctx(),
         task_id="rul_status_filter",
     )
 
     assert supplied_rules == [
-        [("archived-rule", "archived")],
+        [("paused-rule", "paused")],
         [("replacement", "active")],
     ]
 
@@ -2153,14 +2252,14 @@ async def test_compile_does_not_write_when_a_later_batch_fails(monkeypatch):
         "_collect_sources",
         AsyncMock(return_value=("", [])),
     )
-    monkeypatch.setattr(service, "_recall_cases", AsyncMock(return_value=[]))
-    monkeypatch.setattr(service, "_load_rules_for_cases", AsyncMock(return_value=[]))
+    monkeypatch.setattr(service, "_recall_scenarios", AsyncMock(return_value=[]))
+    monkeypatch.setattr(service, "_load_rules_for_scenarios", AsyncMock(return_value=[]))
     prompt_token_limit = (
         estimate_text_tokens(
             service._render_compile_prompt(
                 instruction="",
                 source_text="",
-                case_data=[],
+                scenario_data=[],
                 rule_data=[],
             )
         )
@@ -2176,7 +2275,7 @@ async def test_compile_does_not_write_when_a_later_batch_fails(monkeypatch):
             RuleMutation(
                 operation="NEW",
                 record=_record(),
-                case=RuleCaseRef(
+                scenario=RuleScenarioRef(
                     name="File operations",
                     description="Rules for editing files.",
                 ),
@@ -2198,3 +2297,183 @@ async def test_compile_does_not_write_when_a_later_batch_fails(monkeypatch):
         )
 
     assert fs.batch is None
+
+
+def _scenario_metadata(scenario_id="file-operations"):
+    return {
+        "schema": SCENARIO_SCHEMA,
+        "scenario_id": scenario_id,
+        "name": "File operations",
+        "description": "All file operation constraints.",
+    }
+
+
+def _stored_markdown(rule):
+    return _render_markdown(
+        {
+            "schema": RULE_SCHEMA,
+            "atomic_id": rule.atomic_id,
+            "revision": rule.revision,
+            "status": rule.status,
+            "scenario_id": rule.scenario_id,
+            **rule.record.model_dump(exclude={"body"}),
+        },
+        rule.record.body,
+    )
+
+
+@pytest.mark.asyncio
+async def test_scenario_directory_loads_rules_without_reference_lists():
+    fs = _FS()
+    scenario_uri = "viking://user/alice/memories/rules/file-operations/abstract.md"
+    fs.documents[scenario_uri] = _render_markdown(_scenario_metadata(), "# File operations")
+    rules = [_stored_rule("selected"), _stored_rule("not-selected", status="paused")]
+    fs.documents.update({rule.uri: _stored_markdown(rule) for rule in rules})
+    service = RuleService()
+    service.set_dependencies(
+        fs=fs, resources=SimpleNamespace(), search=SimpleNamespace(), vlm_resolver=None
+    )
+
+    scenario = await service._load_scenario(scenario_uri, _ctx())
+    loaded = await service._load_rules_for_scenarios([scenario], _ctx(), strict=True)
+
+    assert {rule.atomic_id for rule in loaded} == {"selected", "not-selected"}
+    assert "rule_uris" not in scenario.model_dump()
+
+
+@pytest.mark.asyncio
+async def test_new_rule_reuses_unrecalled_scenario_without_losing_members():
+    fs = _FS()
+    scenario_uri = "viking://user/alice/memories/rules/file-operations/abstract.md"
+    metadata = _scenario_metadata()
+    fs.documents[scenario_uri] = _render_markdown(metadata, "# File operations")
+    old = _stored_rule("unselected")
+    fs.documents[old.uri] = _stored_markdown(old)
+    service = RuleService()
+    service.set_dependencies(
+        fs=fs, resources=SimpleNamespace(), search=SimpleNamespace(), vlm_resolver=None
+    )
+    plan = RuleCompilePlan(
+        mutations=[
+            RuleMutation(
+                operation="NEW",
+                record=_record("new-rule"),
+                scenario=RuleScenarioRef(
+                    name="file operations", description="A narrower description."
+                ),
+            )
+        ]
+    )
+
+    result = await service._apply_plan(
+        plan, existing_scenarios=[], existing_rules=[], source_uris=[], ctx=_ctx()
+    )
+    writes = {item["uri"]: item["content"] for item in fs.batch["operations"]}
+    scenario_data = yaml.safe_load(writes[scenario_uri].split("---", 2)[1])
+    assert scenario_data["description"] == metadata["description"]
+    assert old.uri not in writes
+    fs.documents.update(writes)
+    scenario = await service._load_scenario(scenario_uri, _ctx())
+    loaded = await service._load_rules_for_scenarios([scenario], _ctx(), strict=True)
+    assert {rule.atomic_id for rule in loaded} == {"unselected", "new-rule"}
+    assert result["operations"][0]["uri"].endswith("/file-operations/new-rule.md")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["abstract", "existing"])
+async def test_new_rule_reserves_summary_name_and_unrecalled_rule_ids(name):
+    fs = _FS()
+    existing = _stored_rule("existing", scenario_id="other-scenario")
+    fs.documents[existing.uri] = _stored_markdown(existing)
+    service = RuleService()
+    service.set_dependencies(
+        fs=fs, resources=SimpleNamespace(), search=SimpleNamespace(), vlm_resolver=None
+    )
+    plan = RuleCompilePlan(
+        mutations=[
+            RuleMutation(
+                operation="NEW",
+                record=_record(name),
+                scenario=RuleScenarioRef(name="File operations", description="File constraints."),
+            )
+        ]
+    )
+
+    result = await service._apply_plan(
+        plan, existing_scenarios=[], existing_rules=[], source_uris=[], ctx=_ctx()
+    )
+    created = result["operations"][0]
+    assert created["atomic_id"].startswith(f"{name}-")
+    assert created["uri"].endswith(f"/{created['atomic_id']}.md")
+    assert existing.uri not in result["written_uris"]
+
+
+@pytest.mark.asyncio
+async def test_rule_directory_identity_must_match_metadata():
+    fs = _FS()
+    rule = _stored_rule("misplaced")
+    uri = rule.uri.replace("/file-operations/", "/other-scenario/")
+    fs.documents[uri] = _stored_markdown(rule)
+    service = RuleService()
+    service.set_dependencies(
+        fs=fs, resources=SimpleNamespace(), search=SimpleNamespace(), vlm_resolver=None
+    )
+    with pytest.raises(ValueError, match="identity does not match"):
+        await service._load_rule(uri, _ctx())
+
+
+@pytest.mark.asyncio
+async def test_recall_reports_corrupt_scenario_instead_of_silently_omitting_it():
+    uri = "viking://user/alice/memories/rules/file-operations/abstract.md"
+    fs = SimpleNamespace(
+        stat=AsyncMock(return_value={}),
+        glob=AsyncMock(return_value={"matches": [uri]}),
+        read=AsyncMock(return_value="invalid metadata"),
+    )
+    service = RuleService()
+    service.set_dependencies(
+        fs=fs,
+        resources=SimpleNamespace(),
+        search=SimpleNamespace(find=AsyncMock(return_value={"memories": [{"uri": uri}]})),
+        vlm_resolver=None,
+    )
+    with pytest.raises(ProcessingError, match="Unreadable recalled Scenario"):
+        await service._recall_scenarios("task", ctx=_ctx(), limit=5, score_threshold=0.1)
+
+
+@pytest.mark.asyncio
+async def test_scenario_layout_batch_write_and_directory_read_with_real_fs(service, monkeypatch):
+    # This fixture lacks queue lease handoff; exercise actual file writes and reads.
+    monkeypatch.setattr(
+        "openviking.storage.content_write.ContentWriteCoordinator._enqueue_lock_coordinator",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "openviking.storage.content_write.ContentWriteCoordinator._refresh_batch",
+        AsyncMock(return_value=None),
+    )
+    ctx = RequestContext(user=service.user, role=Role.USER)
+    rules = service.rules
+    await rules._ensure_rule_directories(ctx)
+    plan = RuleCompilePlan(
+        mutations=[
+            RuleMutation(
+                operation="NEW",
+                record=_record(),
+                scenario=RuleScenarioRef(
+                    name="File operations", description="Rules for modifying and deleting files."
+                ),
+            )
+        ]
+    )
+    result = await rules._apply_plan(
+        plan, existing_scenarios=[], existing_rules=[], source_uris=[], ctx=ctx
+    )
+    root = f"viking://user/{ctx.user.user_id}/memories/rules"
+    summary_uri = f"{root}/file-operations/abstract.md"
+    assert result["written_uris"] == [summary_uri, f"{root}/file-operations/confirm-delete.md"]
+    scenario = await rules._load_scenario(summary_uri, ctx)
+    loaded = await rules._load_rules_for_scenarios([scenario], ctx, strict=True)
+    assert len(loaded) == 1
+    assert loaded[0].record.content == _record().content
+    assert loaded[0].scenario_id == "file-operations"

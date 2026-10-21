@@ -24,7 +24,7 @@ class _AGFS:
         raise AssertionError(path)
 
     async def stat(self, path):
-        return {"isDir": path == "/local/acme/user/alice/memories/rules/items"}
+        return {"isDir": path == "/local/acme/user/alice/memories/rules"}
 
 
 @pytest.mark.asyncio
@@ -32,12 +32,12 @@ async def test_rule_cleanup_scheduler_scans_only_existing_rule_libraries():
     cleanup = AsyncMock(
         return_value={
             "scanned": 2,
-            "deleted": ["viking://user/alice/memories/rules/items/old.md"],
+            "deleted": ["viking://user/alice/memories/rules/file-operations/old.md"],
             "failed": [],
         }
     )
     scheduler = RuleCleanupScheduler(
-        SimpleNamespace(cleanup_deleted_rules=cleanup),
+        SimpleNamespace(cleanup_archived_rules=cleanup),
         SimpleNamespace(agfs=object()),
         RulesConfig(),
     )

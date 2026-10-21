@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
-"""Periodic cleanup for rules that have remained deleted past retention."""
+"""Periodic cleanup for rules that have remained archived past retention."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ AGFS_ACCOUNT_ROOT = "/local"
 
 
 class RuleCleanupScheduler:
-    """Scan user rule libraries and remove expired deleted rules."""
+    """Scan user rule libraries and remove expired archived rules."""
 
     def __init__(
         self,
@@ -34,7 +34,7 @@ class RuleCleanupScheduler:
         self._rule_service = rule_service
         self._viking_fs = viking_fs
         self._config = config
-        self._interval = float(config.deleted_cleanup_interval_seconds)
+        self._interval = float(config.archived_cleanup_interval_seconds)
         self._sleep = sleep
         self._running = False
         self._task: asyncio.Task[None] | None = None
@@ -48,7 +48,7 @@ class RuleCleanupScheduler:
         logger.info(
             "RuleCleanupScheduler started with interval %.3fs and retention %d days",
             self._interval,
-            self._config.deleted_retention_days,
+            self._config.archived_retention_days,
         )
 
     async def stop(self) -> None:
@@ -68,7 +68,7 @@ class RuleCleanupScheduler:
             try:
                 await self._scan_once()
             except Exception:
-                logger.exception("Deleted-rule cleanup scan failed")
+                logger.exception("Archived-rule cleanup scan failed")
             wait = self._interval - (time.monotonic() - started)
             if wait <= 0:
                 continue
@@ -88,11 +88,11 @@ class RuleCleanupScheduler:
                 role=Role(Role.USER),
             )
             try:
-                result = await self._rule_service.cleanup_deleted_rules(ctx=ctx)
+                result = await self._rule_service.cleanup_archived_rules(ctx=ctx)
             except Exception:
                 failed += 1
                 logger.exception(
-                    "Deleted-rule cleanup failed for account=%s user=%s",
+                    "Archived-rule cleanup failed for account=%s user=%s",
                     account_id,
                     user_id,
                 )
@@ -112,7 +112,7 @@ class RuleCleanupScheduler:
         try:
             account_entries = await agfs.ls(AGFS_ACCOUNT_ROOT)
         except Exception:
-            logger.warning("Failed to scan accounts for deleted-rule cleanup", exc_info=True)
+            logger.warning("Failed to scan accounts for archived-rule cleanup", exc_info=True)
             return
 
         for account_entry in account_entries:
@@ -125,7 +125,7 @@ class RuleCleanupScheduler:
             except Exception as exc:
                 if not is_not_found_error(exc):
                     logger.warning(
-                        "Failed to scan users for deleted-rule cleanup: %s",
+                        "Failed to scan users for archived-rule cleanup: %s",
                         users_root,
                         exc_info=True,
                     )
@@ -135,14 +135,14 @@ class RuleCleanupScheduler:
                 user_id = str(user_entry.get("name") or "").strip()
                 if not user_id or not user_entry.get("isDir", False):
                     continue
-                items_root = f"{users_root}/{user_id}/memories/rules/items"
+                rules_root = f"{users_root}/{user_id}/memories/rules"
                 try:
-                    stat = await agfs.stat(items_root)
+                    stat = await agfs.stat(rules_root)
                 except Exception as exc:
                     if not is_not_found_error(exc):
                         logger.warning(
                             "Failed to inspect rule library for cleanup: %s",
-                            items_root,
+                            rules_root,
                             exc_info=True,
                         )
                     continue

@@ -161,10 +161,6 @@ Compiled Rule 的可选模型与生命周期配置：
       "model": "jev-latest",
       "mode": "noul"
     },
-    "rule_matcher": {
-      "provider": "openai",
-      "model": "gpt-4o-mini"
-    },
     "compiler": {
       "provider": "openai",
       "model": "gpt-4o"
@@ -176,17 +172,32 @@ Compiled Rule 的可选模型与生命周期配置：
 
 | 字段 | 类型 / 可选值 | 默认值 | 作用 |
 |---|---|---|---|
-| `jev_rule_matcher` | rerank 配置 / `null` | `null` | Case 过滤和 Rule 适用性判断使用的 Jev Noul 模型 |
-| `rule_matcher` | VLM 配置 / `null` | `null` | Rule 适用性判断的 VLM 回退模型 |
+| `jev_rule_matcher` | rerank 配置 / `null` | `null` | Scenario 过滤和 Rule 适用性判断使用的 Jev Noul 模型 |
 | `compiler` | VLM 配置 / `null` | `null` | 专用 Rule Compiler |
 | `compiler_context_window` | `0` 或 integer `>= 2048` | `0` | Compiler 上下文窗口；`0` 表示自动探测并使用保守回退值 |
-| `case_irrelevance_threshold` | number，`0.5`-`1.0` | `0.9` | Case 无关概率达到该值时跳过 |
-| `deleted_retention_days` | integer，`>= 1` | `30` | deleted Rule 的物理删除保留天数 |
-| `deleted_cleanup_interval_seconds` | integer，`>= 60` | `2592000` | deleted Rule 清理周期 |
-| `deleted_cleanup_enabled` | boolean | `true` | 是否定期清理 deleted Rule |
+| `scenario_irrelevance_threshold` | number，`0.5`-`1.0` | `0.9` | Scenario 无关概率达到该值时跳过 |
+| `archived_retention_days` | integer，`>= 1` | `30` | archived Rule 的物理删除保留天数 |
+| `archived_cleanup_interval_seconds` | integer，`>= 60` | `2592000` | archived Rule 清理周期 |
+| `archived_cleanup_enabled` | boolean | `true` | 是否定期清理 archived Rule |
 
-`jev_rule_matcher` 必须使用 `jev` provider 和 `noul` 模式。适用性判断依次回退到
-`rule_matcher` 和账户默认 VLM；规则编译从 `compiler` 回退到账户默认 VLM。
+Rule 状态为 `active`、`paused`、`archived`。`PAUSE` 暂停检索但不设置清理期限；
+`ARCHIVE` 从 `archived_at` 开始计算保留期；`RESTORE` 可恢复两种状态为 active，
+并清除归档时间。编译候选只包含 active 和 paused Rule。
+
+Rule 按 Scenario 直接存放在 `memories/rules/<scenario_id>/`：`abstract.md`
+保存场景元信息，`<atomic_id>.md` 保存规则。存储格式见
+[Rule Scenarios](../../../examples/rules/README.md)。
+
+`jev_rule_matcher` 必须使用 `jev` provider 和 `noul` 模式。未配置、不可用、调用失败
+或返回无效结果时，Scenario 和 Rule 判断直接放行，不调用 VLM。Scenario 诊断记录
+`decision=pass`；Rule 返回 `judge=pass` 和 warning，以 `1.0` 作为通过阈值的放行分数，
+该值不是模型评估的适用概率。Agent 仍需根据具体事实核验适用条件和例外。
+规则编译从 `compiler` 回退到账户默认 VLM。原 `rule_matcher` 配置已移除，不再读取。
+
+Rule 的 `applies_when` 可以为空，默认空值；为空时表示任何情况都适用，除非
+`exception` 条件成立。没有适用条件和例外的候选 Rule 适用概率直接取 `1.0`。
+Compiler 会优先忠实提炼原文中的对象、操作、前提和场景，尽量生成非空且可判定的
+`applies_when`，不得编造条件或丢弃原文已有的限制。空条件不表示未知或不适用。
 
 ### `rerank`
 

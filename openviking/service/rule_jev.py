@@ -28,7 +28,7 @@ class RuleJevInput:
 
     def __post_init__(self) -> None:
         normalized = self.applies_when.strip()
-        if normalized.casefold() in {"", "none", "(none)", "[]", "[ ]"}:
+        if normalized.casefold() in {"none", "(none)", "[]", "[ ]"}:
             raise ValueError("Rule Jev input requires applies_when")
         object.__setattr__(self, "applies_when", normalized)
 
@@ -77,19 +77,20 @@ class RuleJevClient:
     def _questions(rules: List[RuleJevInput]) -> Dict[str, dict]:
         questions: Dict[str, dict] = {}
         for index, rule in enumerate(rules):
-            questions[f"applies_when_{index}"] = {
-                "type": MODE_NOUL,
-                "instructions": {
-                    "rule_index": index,
-                    "question": (
-                        "Does rules[rule_index] apply to task_context? Judge only "
-                        "applicability, not whether the Rule is satisfied or violated."
-                    ),
-                },
-                "criteria": {
-                    "true": rule.applies_when,
-                },
-            }
+            if rule.applies_when:
+                questions[f"applies_when_{index}"] = {
+                    "type": MODE_NOUL,
+                    "instructions": {
+                        "rule_index": index,
+                        "question": (
+                            "Does rules[rule_index] apply to task_context? Judge only "
+                            "applicability, not whether the Rule is satisfied or violated."
+                        ),
+                    },
+                    "criteria": {
+                        "true": rule.applies_when,
+                    },
+                }
             if rule.exception:
                 questions[f"exception_{index}"] = {
                     "type": MODE_NOUL,
@@ -129,13 +130,16 @@ class RuleJevClient:
     ) -> List[RuleJevScore] | None:
         if not rules:
             return []
+        questions = self._questions(rules)
+        if not questions:
+            return [RuleJevScore(applies_when=1.0, exception=0.0) for _ in rules]
         body = {
             "model": self.model_name,
             "state": {
                 "task_context": task_context,
                 "rules": [{"name": rule.name, "content": rule.content} for rule in rules],
             },
-            "questions": self._questions(rules),
+            "questions": questions,
         }
         try:
             if self.log_payloads:
@@ -165,7 +169,7 @@ class RuleJevClient:
                     applies_when=self._answer(
                         answers,
                         f"applies_when_{index}",
-                        expected=True,
+                        expected=bool(rule.applies_when),
                         default=1.0,
                     ),
                     exception=self._answer(

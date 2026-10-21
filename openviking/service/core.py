@@ -638,7 +638,7 @@ class OpenVikingService:
             rules_config=config.rules,
             config=config,
         )
-        if config.rules.deleted_cleanup_enabled:
+        if config.rules.archived_cleanup_enabled:
             self._rule_cleanup_scheduler = RuleCleanupScheduler(
                 self._rule_service,
                 self._viking_fs,

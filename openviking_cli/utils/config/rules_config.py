@@ -13,19 +13,19 @@ from .vlm_config import VLMConfig
 class RulesConfig(BaseModel):
     """Models dedicated to the rules module."""
 
-    deleted_retention_days: int = Field(
+    archived_retention_days: int = Field(
         default=30,
         ge=1,
-        description="Days a rule must remain deleted before permanent cleanup",
+        description="Days a rule must remain archived before permanent cleanup",
     )
-    deleted_cleanup_interval_seconds: int = Field(
+    archived_cleanup_interval_seconds: int = Field(
         default=2_592_000,
         ge=60,
-        description="Interval between deleted-rule cleanup scans",
+        description="Interval between archived-rule cleanup scans",
     )
-    deleted_cleanup_enabled: bool = Field(
+    archived_cleanup_enabled: bool = Field(
         default=True,
-        description="Whether to periodically clean up rules deleted past retention",
+        description="Whether to periodically clean up rules archived past retention",
     )
     compiler_context_window: int = Field(
         default=0,
@@ -39,18 +39,14 @@ class RulesConfig(BaseModel):
         default=None,
         description="Optional Jev Noul model for independent rule applicability scoring",
     )
-    case_irrelevance_threshold: float = Field(
+    scenario_irrelevance_threshold: float = Field(
         default=0.9,
         ge=0.5,
         le=1.0,
         description=(
-            "Skip a recalled Case only when Jev's probability that it is completely "
+            "Skip a recalled Scenario only when Jev's probability that it is completely "
             "unrelated to the current context meets this threshold"
         ),
-    )
-    rule_matcher: Optional[VLMConfig] = Field(
-        default=None,
-        description="Optional VLM used when Jev matching is unavailable",
     )
     compiler: Optional[VLMConfig] = Field(
         default=None,
@@ -70,16 +66,8 @@ class RulesConfig(BaseModel):
             raise ValueError("rules.jev_rule_matcher must use mode 'noul'")
         return self
 
-    @staticmethod
-    def _configured_vlm(config: Optional[VLMConfig]) -> Optional[VLMConfig]:
-        if config is not None and config._has_any_config():
-            return config
-        return None
-
-    def get_rule_matcher(self) -> Optional[VLMConfig]:
-        """Return the dedicated rule matcher, treating an empty block as unset."""
-        return self._configured_vlm(self.rule_matcher)
-
     def get_compiler(self) -> Optional[VLMConfig]:
         """Return the dedicated compiler, treating an empty block as unset."""
-        return self._configured_vlm(self.compiler)
+        if self.compiler is not None and self.compiler._has_any_config():
+            return self.compiler
+        return None
