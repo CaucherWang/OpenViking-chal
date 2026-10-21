@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -9,6 +9,45 @@ from openviking.service.rule_resource_ingest import (
     ingest_add_resource_request,
 )
 from openviking_cli.session.user_id import UserIdentifier
+
+
+@pytest.mark.asyncio
+async def test_temp_upload_uses_active_server_config(monkeypatch):
+    resolved = SimpleNamespace(
+        local_path="/tmp/rules.md",
+        original_filename="rules.md",
+        cleanup=AsyncMock(),
+    )
+    store = SimpleNamespace(
+        resolve_shared_reference=AsyncMock(return_value=None),
+        resolve_for_consume=AsyncMock(return_value=resolved),
+    )
+    build_store = Mock(return_value=store)
+    server_config = SimpleNamespace(temp_upload=SimpleNamespace())
+    resources = SimpleNamespace(
+        add_resource=AsyncMock(return_value={"root_uri": "viking://user/alice/resources/rules"})
+    )
+    monkeypatch.setattr(
+        "openviking.service.rule_resource_ingest.TempUploadStore.build",
+        build_store,
+    )
+    monkeypatch.setattr(
+        "openviking.server.dependencies.get_server_config",
+        lambda: server_config,
+    )
+
+    await ingest_add_resource_request(
+        AddResourceRequest(temp_file_id="upload_rules", source_name="rules.md"),
+        RequestContext(user=UserIdentifier("acme", "alice"), role=Role.USER),
+        resources=resources,
+        config=SimpleNamespace(),
+        force_wait=True,
+    )
+
+    build_store.assert_called_once_with(server_config)
+    store.resolve_for_consume.assert_awaited_once()
+    assert resources.add_resource.await_args.kwargs["path"] == "/tmp/rules.md"
+    resolved.cleanup.assert_awaited_once()
 
 
 @pytest.mark.asyncio

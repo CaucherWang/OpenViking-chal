@@ -114,7 +114,14 @@ async def ingest_add_resource_request(
                 "sitemap / RSS source instead, or re-add the resource when the "
                 "source changes."
             )
-        store = TempUploadStore.build(config)
+        server_config = config
+        if not hasattr(server_config, "temp_upload"):
+            from openviking.server.dependencies import get_server_config
+
+            server_config = get_server_config()
+        if server_config is None:
+            raise RuntimeError("Server configuration is unavailable for temporary upload")
+        store = TempUploadStore.build(server_config)
         shared_source_ref = await store.resolve_shared_reference(request.temp_file_id, ctx)
         if shared_source_ref is not None:
             path = shared_source_ref.original_filename or request.temp_file_id

@@ -27,6 +27,7 @@ from openviking.service.rule_service import (
     _render_rules,
 )
 from openviking.service.task_tracker import TaskRecord, TaskStatus
+from openviking.service.task_work_index import bind_task_context, get_task_context
 from openviking.utils.token_estimation import estimate_text_tokens
 from openviking_cli.exceptions import (
     InvalidArgumentError,
@@ -101,6 +102,8 @@ def test_compile_prompt_does_not_expose_memory_preference_fields():
     assert "REPLACE" in prompt
     assert "Infer the single semantic target" in prompt
     assert "use UNCERTAIN instead of" in prompt
+    assert "conditional branches into one Rule" in prompt
+    assert "Only NEW may include a non-null `case`" in prompt
     assert "SUPERSEDE" not in prompt
     assert "SPLIT" not in prompt
     assert '"children":' not in prompt
@@ -281,8 +284,10 @@ def _stored_rule(
 class _FS:
     def __init__(self):
         self.batch = None
+        self.batch_task_context = None
 
     async def batch_write(self, **kwargs):
+        self.batch_task_context = get_task_context()
         self.batch = kwargs
         return {
             "created": [operation["uri"] for operation in kwargs["operations"]],
@@ -664,16 +669,26 @@ async def test_apply_new_rule_writes_markdown_item_and_case():
         ]
     )
 
-    result = await service._apply_plan(
-        plan,
-        existing_cases=[],
-        existing_rules=[],
-        source_uris=["viking://user/alice/resources/rules"],
-        ctx=_ctx(),
-    )
+    with bind_task_context(
+        "rul_123",
+        "acme",
+        "alice",
+        enqueued_work=[],
+        work_id="inline:rule-compile",
+    ):
+        result = await service._apply_plan(
+            plan,
+            existing_cases=[],
+            existing_rules=[],
+            source_uris=["viking://user/alice/resources/rules"],
+            ctx=_ctx(),
+        )
 
     assert len(result["written_uris"]) == 2
+    assert fs.batch_task_context is not None
+    assert fs.batch_task_context.task_id == "rul_123"
     assert fs.batch["root_uri"] == "viking://user/alice/memories/rules"
+    assert fs.batch["wait"] is False
     by_uri = {operation["uri"]: operation["content"] for operation in fs.batch["operations"]}
     rule_uri = "viking://user/alice/memories/rules/items/confirm-delete.md"
     case_uri = "viking://user/alice/memories/rules/cases/destructive-file-operations.md"
@@ -1209,6 +1224,50 @@ def test_rule_renderer_omits_empty_exception():
 
     assert "Applies when: when a task requires deleting files" in rendered
     assert "Exception:" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_run_compile_registers_owned_running_work(monkeypatch):
+    tracker = SimpleNamespace(
+        register_running_task=AsyncMock(return_value="inline:rule-compile"),
+        start=AsyncMock(),
+        complete=AsyncMock(),
+        fail=AsyncMock(),
+        unregister_running_task=AsyncMock(),
+    )
+    service = RuleService()
+    compile_rule = AsyncMock(return_value={"rules_root": "viking://user/alice/memories/rules"})
+    monkeypatch.setattr(
+        "openviking.service.rule_service.get_task_tracker",
+        lambda: tracker,
+    )
+    monkeypatch.setattr(service, "_compile", compile_rule)
+
+    await service._run_compile(
+        task_id="rul_123",
+        request=RuleCompileRequest(instruction="compile these rules"),
+        ctx=_ctx(),
+    )
+
+    tracker.register_running_task.assert_awaited_once_with(
+        "rul_123",
+        account_id="acme",
+        user_id="alice",
+    )
+    tracker.start.assert_awaited_once_with(
+        "rul_123",
+        account_id="acme",
+        user_id="alice",
+        stage="ingesting_sources",
+    )
+    tracker.complete.assert_awaited_once_with(
+        "rul_123",
+        {"rules_root": "viking://user/alice/memories/rules"},
+        account_id="acme",
+        user_id="alice",
+    )
+    tracker.fail.assert_not_awaited()
+    tracker.unregister_running_task.assert_awaited_once_with("rul_123")
 
 
 @pytest.mark.asyncio

@@ -562,7 +562,11 @@ class RuleService:
         ctx: RequestContext,
     ) -> None:
         tracker = get_task_tracker()
-        tracker.register_running_task(task_id)
+        running_work_id = await tracker.register_running_task(
+            task_id,
+            account_id=ctx.account_id,
+            user_id=ctx.user.user_id,
+        )
         try:
             await tracker.start(
                 task_id,
@@ -570,7 +574,13 @@ class RuleService:
                 user_id=ctx.user.user_id,
                 stage="ingesting_sources",
             )
-            with bind_task_context(task_id, ctx.account_id, ctx.user.user_id):
+            with bind_task_context(
+                task_id,
+                ctx.account_id,
+                ctx.user.user_id,
+                enqueued_work=[],
+                work_id=running_work_id,
+            ):
                 lock = self._compile_locks.setdefault(
                     (ctx.account_id, ctx.user.user_id), asyncio.Lock()
                 )
@@ -731,7 +741,7 @@ class RuleService:
                     for uri, content in accumulated_writes.items()
                 ],
                 ctx=ctx,
-                wait=True,
+                wait=False,
             )
         else:
             write_result = {"created": [], "updated": [], "unchanged": []}
@@ -1761,7 +1771,9 @@ meaning are more important than brevity.
 - UNCERTAIN only when the supplied material and existing Rules cannot resolve an
   ambiguity whose alternatives would change future behavior. Do not use UNCERTAIN for
   awkward wording, missing optional detail, or alternatives that are behaviorally
-  equivalent. Emit valid mutations for clear independent policies in the same plan.
+  equivalent. A source policy that explicitly defines complete behavior for multiple
+  decidable conditions is not ambiguous: compile its conditional branches into one Rule.
+  Emit valid mutations for clear independent policies in the same plan.
 - ARCHIVE, DELETE, and RESTORE are allowed only when instruction_text or parsed_sources
   explicitly request that lifecycle action for identifiable Rules. The compiler must
   never retire a Rule merely because it seems obsolete, duplicated, or low quality.
@@ -1791,6 +1803,7 @@ meaning are more important than brevity.
 - Reuse an existing case_id when its retrieval meaning covers the new Rule. Create a new
   Case only when no existing Case is suitable. Keep Case names and descriptions broad
   enough to retrieve the Rule but narrow enough to avoid unrelated tasks.
+- Only NEW may include a non-null `case`. Every other operation must set `case` to null.
 - UPDATE and REPLACE return complete final records, never deltas. Do not add schema
   fields. Return JSON only, with no Markdown or commentary.
 
@@ -2098,7 +2111,7 @@ existing_rules:
                     for uri, content in writes.items()
                 ],
                 ctx=ctx,
-                wait=True,
+                wait=False,
             )
         else:
             write_result = {"created": [], "updated": [], "unchanged": []}
