@@ -95,7 +95,7 @@ def start(output: Path, arms: list[str]) -> None:
             config["rules"] = dict(local.get("rules", {}))
             config["rules"].update(
                 compiler_context_window=32768,
-                deleted_cleanup_enabled=False,
+                archived_cleanup_enabled=False,
             )
         config_path = runtime / f"{arm}.conf"
         write_json(config_path, config)
@@ -328,7 +328,7 @@ def offline(output: Path, arms: list[str]) -> None:
         )
         rules_inventory = write_inventory(
             rules_client,
-            f"{rules_root.rstrip('/')}/items",
+            rules_root.rstrip("/"),
             rules_trace,
             runtime / "rules_inventory.json",
         )
