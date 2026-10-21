@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0
 """Rule-only Jev Noul questions without changing the shared rerank client."""
 
+from dataclasses import dataclass
 from typing import Dict, List
 
 from openviking.models.rerank.jev_rerank import (
@@ -9,6 +10,13 @@ from openviking.models.rerank.jev_rerank import (
     JevRerankClient,
     NoulRerankMode,
 )
+
+
+@dataclass(frozen=True)
+class RuleNoulQuestion:
+    question: str
+    true_criterion: str
+    false_criterion: str
 
 
 class _RuleNoulMode(NoulRerankMode):
@@ -40,6 +48,42 @@ class _RuleNoulMode(NoulRerankMode):
         }
 
 
+class _RuleMultiNoulMode(NoulRerankMode):
+    def __init__(self, questions: List[RuleNoulQuestion]) -> None:
+        self._questions = questions
+
+    def build_questions(self, documents: List[str]) -> Dict[str, dict]:
+        if len(documents) != len(self._questions):
+            raise ValueError("Rule Jev documents and questions must have the same length")
+        return {
+            f"relevance_{index}": {
+                "type": MODE_NOUL,
+                "instructions": {
+                    "candidate_index": index,
+                    "question": question.question,
+                },
+                "criteria": {
+                    "true": question.true_criterion,
+                    "false": question.false_criterion,
+                },
+            }
+            for index, question in enumerate(self._questions)
+        }
+
+
+def _create_rule_jev_client(config) -> JevRerankClient | None:
+    client = JevRerankClient.from_config(config)
+    if client is None:
+        return None
+    if client.mode != MODE_NOUL:
+        client.close()
+        raise ValueError("Rule Jev judgments require mode='noul'")
+    extra_headers = dict(getattr(config, "extra_headers", None) or {})
+    if extra_headers:
+        client._client.headers.update(extra_headers)  # noqa: SLF001 - isolated adapter hook
+    return client
+
+
 def create_rule_jev_judge(
     config,
     *,
@@ -48,22 +92,33 @@ def create_rule_jev_judge(
     false_criterion: str,
 ) -> JevRerankClient | None:
     """Build an isolated Jev client with a Rule-specific Noul question."""
-    client = JevRerankClient.from_config(config)
+    client = _create_rule_jev_client(config)
     if client is None:
         return None
-    if client.mode != MODE_NOUL:
-        client.close()
-        raise ValueError("Rule Jev judgments require mode='noul'")
 
     client._strategy = _RuleNoulMode(  # noqa: SLF001 - isolated adapter hook
         question=question,
         true_criterion=true_criterion,
         false_criterion=false_criterion,
     )
-    extra_headers = dict(getattr(config, "extra_headers", None) or {})
-    if extra_headers:
-        client._client.headers.update(extra_headers)  # noqa: SLF001 - isolated adapter hook
     return client
 
 
-__all__ = ["create_rule_jev_judge"]
+def create_rule_jev_multi_judge(
+    config,
+    *,
+    questions: List[RuleNoulQuestion],
+) -> JevRerankClient | None:
+    """Build one Jev client for per-document Rule Noul questions."""
+    client = _create_rule_jev_client(config)
+    if client is None:
+        return None
+    client._strategy = _RuleMultiNoulMode(questions)  # noqa: SLF001 - isolated adapter hook
+    return client
+
+
+__all__ = [
+    "RuleNoulQuestion",
+    "create_rule_jev_judge",
+    "create_rule_jev_multi_judge",
+]

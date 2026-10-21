@@ -358,6 +358,7 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
             update={"content": "---\ncondition: legacy hidden value\n---\n"}
         ),
         _stored_rule("rule-b"),
+        _stored_rule("rule-c"),
         _stored_rule("unconditional").model_copy(
             update={
                 "record": _record("unconditional").model_copy(
@@ -368,38 +369,30 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
     ]
 
     class _JevClient:
-        def __init__(self, kind):
-            self.kind = kind
+        def __init__(self):
             self.closed = False
+            self.calls = []
 
         def rerank_batch(self, query, documents):
             assert query == "delete generated files"
-            assert len(documents) == 2
+            assert len(documents) == 6
+            self.calls.append((query, documents))
             assert "Rule ID: rule-a" in documents[0]
             assert "legacy hidden value" not in documents[0]
             assert "Condition:" not in documents[0]
             assert "Constraint:" not in documents[0]
-            if self.kind == "applies_when":
-                assert all("applies_when:" in document for document in documents)
-                assert all("exception:" not in document for document in documents)
-                return [0.9, 0.8]
-            assert all("exception:" in document for document in documents)
-            assert all(
-                not document.splitlines()[-1].startswith("applies_when:") for document in documents
-            )
-            return [0.1, 0.7]
+            assert all("applies_when:" in documents[index] for index in (0, 2, 4))
+            assert all("exception:" in documents[index] for index in (1, 3, 5))
+            return [0.9, 0.1, 0.8, 0.7, 0.6, 0.8]
 
         def close(self):
             self.closed = True
 
-    clients = []
-    judge_configs = []
+    client = _JevClient()
+    captured_questions = []
 
-    def create_judge(config, **kwargs):
-        kind = "exception" if "exception clause" in kwargs["question"] else "applies_when"
-        client = _JevClient(kind)
-        clients.append(client)
-        judge_configs.append(kwargs)
+    def create_judge(config, *, questions):
+        captured_questions.extend(questions)
         return client
 
     service = RuleService()
@@ -416,7 +409,7 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
     vlm_score = AsyncMock(side_effect=AssertionError("VLM matcher must not run"))
     monkeypatch.setattr(service, "_score_rules_with_vlm", vlm_score)
     monkeypatch.setattr(
-        "openviking.service.rule_service.create_rule_jev_judge",
+        "openviking.service.rule_service.create_rule_jev_multi_judge",
         create_judge,
     )
 
@@ -426,15 +419,16 @@ async def test_jev_rule_matcher_has_priority_over_vlm(monkeypatch):
         _ctx(),
     )
 
-    assert scores == pytest.approx([0.9, 0.3, 1.0])
+    assert scores == pytest.approx([0.9, 0.8, 0.0, 1.0])
     assert backend == "jev_noul"
     assert warning is None
-    assert len(clients) == 2
-    assert all(client.closed for client in clients)
-    assert "applies_when clause" in judge_configs[0]["question"]
-    assert "exception clause" in judge_configs[1]["question"]
-    assert "entire applies_when clause" in judge_configs[0]["true_criterion"]
-    assert "entire exception clause" in judge_configs[1]["true_criterion"]
+    assert client.closed is True
+    assert len(client.calls) == 1
+    assert len(captured_questions) == 6
+    assert "applies_when clause" in captured_questions[0].question
+    assert "exception clause" in captured_questions[1].question
+    assert "entire applies_when clause" in captured_questions[0].true_criterion
+    assert "entire exception clause" in captured_questions[1].true_criterion
     vlm_score.assert_not_awaited()
 
 
@@ -465,7 +459,7 @@ async def test_jev_rule_matcher_failure_falls_back_to_vlm(monkeypatch):
     vlm_score = AsyncMock(return_value=[0.7])
     monkeypatch.setattr(service, "_score_rules_with_vlm", vlm_score)
     monkeypatch.setattr(
-        "openviking.service.rule_service.create_rule_jev_judge",
+        "openviking.service.rule_service.create_rule_jev_multi_judge",
         lambda config, **kwargs: client,
     )
 

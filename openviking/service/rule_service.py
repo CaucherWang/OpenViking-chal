@@ -9,7 +9,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
@@ -23,7 +23,11 @@ from openviking.parse.parsers.media.constants import MEDIA_EXTENSIONS
 from openviking.server.identity import RequestContext
 from openviking.service.fs_service import FSService
 from openviking.service.resource_service import ResourceService
-from openviking.service.rule_jev import create_rule_jev_judge
+from openviking.service.rule_jev import (
+    RuleNoulQuestion,
+    create_rule_jev_judge,
+    create_rule_jev_multi_judge,
+)
 from openviking.service.rule_resource_ingest import (
     AddResourceRequest,
     ingest_add_resource_request,
@@ -1108,6 +1112,7 @@ class RuleService:
             query,
             rules,
             ctx,
+            rule_probability_threshold=rule_probability_threshold,
         )
         selected = sorted(
             (
@@ -2148,84 +2153,61 @@ existing_rules:
         task_context: str,
         rules: list[StoredRule],
         config: Any,
+        *,
+        exception_veto_threshold: float,
     ) -> list[float]:
         applies_scores = [1.0] * len(rules)
         exception_scores = [0.0] * len(rules)
+        documents: list[str] = []
+        questions: list[RuleNoulQuestion] = []
+        assignments: list[tuple[str, int]] = []
+        for index, rule in enumerate(rules):
+            if _meaningful_applicability_clause(rule.record.applies_when):
+                documents.append(_render_applies_when_for_judge(rule))
+                questions.append(
+                    RuleNoulQuestion(
+                        question=_RULE_APPLIES_WHEN_QUESTION,
+                        true_criterion=_RULE_APPLIES_WHEN_TRUE_CRITERION,
+                        false_criterion=_RULE_APPLIES_WHEN_FALSE_CRITERION,
+                    )
+                )
+                assignments.append(("applies_when", index))
+            if _meaningful_applicability_clause(rule.record.exception):
+                documents.append(_render_exception_for_judge(rule))
+                questions.append(
+                    RuleNoulQuestion(
+                        question=_RULE_EXCEPTION_QUESTION,
+                        true_criterion=_RULE_EXCEPTION_TRUE_CRITERION,
+                        false_criterion=_RULE_EXCEPTION_FALSE_CRITERION,
+                    )
+                )
+                assignments.append(("exception", index))
 
-        async def judge(
-            indices: list[int],
-            *,
-            question: str,
-            true_criterion: str,
-            false_criterion: str,
-            render: Callable[[StoredRule], str],
-        ) -> tuple[list[int], list[float]]:
-            client = create_rule_jev_judge(
-                config,
-                question=question,
-                true_criterion=true_criterion,
-                false_criterion=false_criterion,
-            )
+        if documents:
+            client = create_rule_jev_multi_judge(config, questions=questions)
             if client is None:
                 raise RuntimeError("Jev Noul judge is unavailable")
             try:
                 scores = await asyncio.to_thread(
                     client.rerank_batch,
                     task_context,
-                    [render(rules[index]) for index in indices],
+                    documents,
                 )
             finally:
                 client.close()
-            if scores is None or len(scores) != len(indices):
+            if scores is None or len(scores) != len(assignments):
                 raise ValueError("Jev Noul returned incomplete Rule scores")
-            return indices, scores
+        else:
+            scores = []
 
-        applies_indices = [
-            index
-            for index, rule in enumerate(rules)
-            if _meaningful_applicability_clause(rule.record.applies_when)
-        ]
-        exception_indices = [
-            index
-            for index, rule in enumerate(rules)
-            if _meaningful_applicability_clause(rule.record.exception)
-        ]
-        jobs = []
-        kinds = []
-        if applies_indices:
-            kinds.append("applies_when")
-            jobs.append(
-                judge(
-                    applies_indices,
-                    question=_RULE_APPLIES_WHEN_QUESTION,
-                    true_criterion=_RULE_APPLIES_WHEN_TRUE_CRITERION,
-                    false_criterion=_RULE_APPLIES_WHEN_FALSE_CRITERION,
-                    render=_render_applies_when_for_judge,
-                )
-            )
-        if exception_indices:
-            kinds.append("exception")
-            jobs.append(
-                judge(
-                    exception_indices,
-                    question=_RULE_EXCEPTION_QUESTION,
-                    true_criterion=_RULE_EXCEPTION_TRUE_CRITERION,
-                    false_criterion=_RULE_EXCEPTION_FALSE_CRITERION,
-                    render=_render_exception_for_judge,
-                )
-            )
-
-        for kind, (indices, scores) in zip(
-            kinds,
-            await asyncio.gather(*jobs),
-            strict=True,
-        ):
+        for (kind, index), score in zip(assignments, scores, strict=True):
             destination = applies_scores if kind == "applies_when" else exception_scores
-            for index, score in zip(indices, scores, strict=True):
-                destination[index] = score
+            destination[index] = score
 
         return [
-            min(applies_score, 1.0 - exception_score)
+            0.0
+            if exception_score >= exception_veto_threshold and exception_score > applies_score
+            else applies_score
             for applies_score, exception_score in zip(
                 applies_scores,
                 exception_scores,
@@ -2238,6 +2220,8 @@ existing_rules:
         task_context: str,
         rules: list[StoredRule],
         ctx: RequestContext,
+        *,
+        rule_probability_threshold: float = DEFAULT_RULE_PROBABILITY_THRESHOLD,
     ) -> tuple[list[float], str, str | None]:
         config = self._rules_config.jev_rule_matcher if self._rules_config is not None else None
         provider = config._effective_provider() if config is not None else None
@@ -2249,7 +2233,12 @@ existing_rules:
             and config.is_available()
         ):
             try:
-                scores = await self._score_rules_with_jev(task_context, rules, config)
+                scores = await self._score_rules_with_jev(
+                    task_context,
+                    rules,
+                    config,
+                    exception_veto_threshold=rule_probability_threshold,
+                )
             except Exception as exc:  # noqa: BLE001 - fall back to the configured VLM
                 logger.warning("Jev rule matcher unavailable: %s", exc)
                 jev_warning = "Jev Noul was unavailable; VLM fallback was used."
