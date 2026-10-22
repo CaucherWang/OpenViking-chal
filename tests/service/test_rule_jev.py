@@ -49,7 +49,7 @@ def test_scenario_jev_judge_uses_scenario_protocol_and_headers(mock_client_class
     config = JevConfig(
         provider="typesafe",
         api_key="key",
-        extra_headers={"ark-beta-systemone-api": "true"},
+        extra_headers={"X-Trace-ID": "trace"},
     )
 
     client = ScenarioJevClient.from_config(config)
@@ -81,7 +81,7 @@ def test_scenario_jev_judge_uses_scenario_protocol_and_headers(mock_client_class
             "about whether it could apply."
         ),
     }
-    assert mock_client_class.call_args.kwargs["headers"]["ark-beta-systemone-api"] == "true"
+    assert mock_client_class.call_args.kwargs["headers"]["X-Trace-ID"] == "trace"
     client.close()
 
 

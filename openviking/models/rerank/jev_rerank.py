@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Protocol
 import httpx
 
 from openviking.models.jev import (
-    DEFAULT_SYSTEM_ONE_URL,
+    DEFAULT_SYSTEM_ONE_API_BASE,
     MODE_CHOICE,
     MODE_NOUL,
     resolve_jev_target,
@@ -116,7 +116,7 @@ class JevRerankClient(RerankBase):
         self,
         api_key: str,
         model_name: str = "jev-latest",
-        api_base: str = DEFAULT_SYSTEM_ONE_URL,
+        api_base: str = DEFAULT_SYSTEM_ONE_API_BASE,
         timeout: float = 30.0,
         log_payloads: bool = False,
         mode: str = MODE_NOUL,
@@ -133,8 +133,12 @@ class JevRerankClient(RerankBase):
         self._strategy = modes[mode]()
         self.api_key = api_key
         self.model_name = model_name
-        self.api_base = api_base
-        self.api_url = self.api_base
+        self.api_base = api_base.rstrip("/")
+        self.api_url = (
+            self.api_base
+            if self.api_base.endswith("/v1/systemone")
+            else f"{self.api_base}/v1/systemone"
+        )
         self.timeout = timeout
         self.log_payloads = log_payloads
         self.provider = "jev"
@@ -216,7 +220,7 @@ class JevRerankClient(RerankBase):
 
     @classmethod
     def from_config(cls, config) -> Optional["JevRerankClient"]:
-        """Create JevRerankClient from dedicated or legacy rerank config."""
+        """Create JevRerankClient from RerankConfig."""
         if not config or not config.is_available():
             return None
         api_base, model, extra_headers = resolve_jev_target(config)

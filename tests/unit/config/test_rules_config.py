@@ -67,8 +67,12 @@ def test_empty_rule_compiler_block_falls_back_to_default_vlm():
             "Jev provider must be one of",
         ),
         (
-            {"provider": "jev", "api_key": "key", "mode": "choice"},
-            "only supports Noul judgments",
+            {"provider": "jev", "api_key": "key"},
+            "Jev provider must be one of",
+        ),
+        (
+            {"provider": "volcengine", "api_key": "key", "model": "unsupported"},
+            "Jev provider must be one of",
         ),
     ],
 )
@@ -97,21 +101,6 @@ def test_jev_provider_defaults(provider, api_base, model):
     assert config.resolved_extra_headers() == {}
 
 
-def test_volcengine_jev_provider_sets_required_header():
-    config = JevConfig(
-        provider="volcengine",
-        api_key="key",
-        model="doubao-seed-2-1-lite-260915",
-        extra_headers={"x-trace-id": "trace"},
-    )
-
-    assert config.resolved_api_base() == ("https://ark.cn-beijing.volces.com/api/v1/systemone")
-    assert config.resolved_extra_headers() == {
-        "ark-beta-systemone-api": "true",
-        "x-trace-id": "trace",
-    }
-
-
 def test_jev_explicit_overrides_are_used_unchanged():
     config = JevConfig(
         provider="vercel",
@@ -136,7 +125,6 @@ def test_jev_explicit_overrides_are_used_unchanged():
             },
             "requires 'model'",
         ),
-        ({"provider": "volcengine", "api_key": "key"}, "requires 'model'"),
         ({"provider": "typesafe"}, "requires 'api_key'"),
     ],
 )
@@ -145,51 +133,17 @@ def test_jev_provider_validates_required_fields(config, expected):
         JevConfig(**config)
 
 
-def test_legacy_jev_config_migrates_without_rerank_fields():
-    config = JevConfig.model_validate(
-        {
-            "provider": "jev",
-            "api_key": "key",
-            "api_base": "https://gateway.example.com/custom/",
-            "mode": "noul",
-            "threshold": 0.5,
-            "max_input_tokens": 2048,
-        }
-    )
-
-    assert config.provider == "custom"
-    assert config.resolved_api_base() == "https://gateway.example.com/custom/"
-    assert config.resolved_model() == "jev-latest"
-    assert not hasattr(config, "mode")
-    assert not hasattr(config, "threshold")
-
-
 @pytest.mark.parametrize(
-    "api_base,provider,resolved_api_base",
+    "field,value",
     [
-        (
-            "https://api.typesafe.ai",
-            "typesafe",
-            "https://api.typesafe.ai/v1/systemone",
-        ),
-        (
-            "https://ai-gateway.vercel.sh/typesafe",
-            "vercel",
-            "https://ai-gateway.vercel.sh/typesafe/v1/systemone",
-        ),
-        (
-            "https://openrouter.ai/api",
-            "openrouter",
-            "https://openrouter.ai/api/v1/systemone",
-        ),
+        ("mode", "noul"),
+        ("threshold", 0.5),
+        ("max_input_tokens", 2048),
     ],
 )
-def test_legacy_jev_provider_migrates_known_endpoint_roots(api_base, provider, resolved_api_base):
-    config = JevConfig.model_validate({"provider": "jev", "api_key": "key", "api_base": api_base})
-
-    assert config.provider == provider
-    assert config.api_base is None
-    assert config.resolved_api_base() == resolved_api_base
+def test_jev_rule_matcher_rejects_rerank_fields(field, value):
+    with pytest.raises(ValueError, match=field):
+        JevConfig.model_validate({"provider": "typesafe", "api_key": "key", field: value})
 
 
 def test_rule_compiler_context_window_rejects_too_small_value():

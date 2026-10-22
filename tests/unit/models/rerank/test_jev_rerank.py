@@ -77,19 +77,19 @@ class TestJevRerankClient:
         assert "headers" not in call.kwargs
 
     @patch("openviking.models.rerank.jev_rerank.httpx.Client")
-    def test_custom_url_is_used_without_appending_a_path(self, mock_client_class):
+    def test_custom_api_base_appends_systemone_path(self, mock_client_class):
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
         mock_client.post.return_value = _mock_response(_systemone_payload([0.8]))
 
         client = JevRerankClient(
             api_key="custom-key",
-            api_base="https://gateway.example.com/custom-jev/",
+            api_base="https://gateway.example.com/custom-jev",
         )
         assert client.rerank_batch("query", ["document"]) == [0.8]
 
         mock_client.post.assert_called_once_with(
-            "https://gateway.example.com/custom-jev/",
+            "https://gateway.example.com/custom-jev/v1/systemone",
             json=mock_client.post.call_args.kwargs["json"],
         )
 
@@ -373,7 +373,7 @@ class TestJevDispatch:
         config = RerankConfig(
             provider="jev",
             api_key="key",
-            api_base="https://ai-gateway.vercel.sh/typesafe/v1/systemone",
+            api_base="https://ai-gateway.vercel.sh/typesafe",
         )
         client = RerankClient.from_config(config)
         assert client.model_name == "typesafe-ai/jev"

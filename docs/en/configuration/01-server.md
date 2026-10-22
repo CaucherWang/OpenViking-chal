@@ -186,10 +186,10 @@ filtering and Rule applicability. It does not configure retrieval reranking.
 
 | Field | Type / values | Default | Purpose |
 |---|---|---|---|
-| `provider` | `typesafe`, `vercel`, `openrouter`, `volcengine`, `custom` | `typesafe` | Select endpoint, model, and required-header defaults |
+| `provider` | `typesafe`, `vercel`, `openrouter`, `custom` | `typesafe` | Select endpoint and model defaults |
 | `api_key` | string | required | API key for the selected provider |
 | `api_base` | URL / `null` | provider default | Complete System One request URL; an explicit value is used unchanged |
-| `model` | string / `null` | provider default | Model name or endpoint ID; required for `volcengine` and `custom` |
+| `model` | string / `null` | provider default | Model name or endpoint ID; required for `custom` |
 | `timeout` | number | `30` | HTTP request timeout in seconds |
 | `extra_headers` | object / `null` | `null` | Additional HTTP request headers |
 | `log_payloads` | boolean | `false` | Log complete requests and responses; these may contain task and Rule content |
@@ -199,7 +199,6 @@ filtering and Rule applicability. It does not configure retrieval reranking.
 | `typesafe` | `https://api.typesafe.ai/v1/systemone` | `jev-latest` | Direct TypeSafe access |
 | `vercel` | `https://ai-gateway.vercel.sh/typesafe/v1/systemone` | `typesafe-ai/jev` | Vercel AI Gateway TypeSafe-compatible API |
 | `openrouter` | `https://openrouter.ai/api/v1/systemone` | `jev-latest` | OpenRouter System One API |
-| `volcengine` | `https://ark.cn-beijing.volces.com/api/v1/systemone` | none | Requires `model`; adds `ark-beta-systemone-api: true` |
 | `custom` | none | none | Requires both `api_base` and `model` |
 
 `api_base` and `model` override provider defaults independently. An explicit
@@ -209,9 +208,6 @@ Rule matching always uses independent Noul judgments, so it has no `mode`,
 `threshold`, or `max_input_tokens` setting. Configure Scenario filtering with
 `rules.scenario_irrelevance_threshold`; Rule applicability uses the threshold supplied
 as `rule_probability_threshold` in the Rule search request (default `0.65`).
-
-For migration, legacy `provider: "jev"` and `mode: "noul"` configurations remain
-accepted. New configurations should select a provider above.
 
 Rule status is `active`, `paused`, or `archived`. `PAUSE` suspends retrieval without
 expiry; `ARCHIVE` starts retention from `archived_at`. `RESTORE` reactivates either
@@ -249,7 +245,7 @@ discard source restrictions. Empty does not mean unknown or inapplicable.
 
 Rerank has no separate `enabled` field. It becomes available when the required provider credentials are configured.
 
-`jev` supports direct TypeSafe access (`https://api.typesafe.ai/v1/systemone`, model `jev-latest`) and Vercel AI Gateway's TypeSafe-compatible endpoint (`https://ai-gateway.vercel.sh/typesafe/v1/systemone`, model `typesafe-ai/jev`) through the existing `api_base` and `model` fields; both speak the same protocol. `api_base` is treated as the complete request URL and is not modified. Its default `noul` mode scores each candidate independently. The optional `choice` mode compares all candidates and returns relative probabilities; set `threshold` to `0` when using it. Setting `provider` explicitly requires the credentials that provider needs: `ak` and `sk` for `vikingdb`, `api_key` for `cohere` and `jev`, `api_key` and `api_base` for `openai`, `model` for `litellm`. An incomplete block is rejected when the configuration loads.
+`jev` supports direct TypeSafe access (`https://api.typesafe.ai/v1/systemone`, model `jev-latest`) and Vercel AI Gateway's TypeSafe-compatible endpoint (`https://ai-gateway.vercel.sh/typesafe/v1/systemone`, model `typesafe-ai/jev`) through the existing `api_base` and `model` fields; both speak the same protocol. For rerank, `api_base` may be either the service root or the complete System One URL; `/v1/systemone` is appended when absent. Its default `noul` mode scores each candidate independently. The optional `choice` mode compares all candidates and returns relative probabilities; set `threshold` to `0` when using it. Setting `provider` explicitly requires the credentials that provider needs: `ak` and `sk` for `vikingdb`, `api_key` for `cohere` and `jev`, `api_key` and `api_base` for `openai`, `model` for `litellm`. An incomplete block is rejected when the configuration loads.
 
 ## Retrieval Settings
 

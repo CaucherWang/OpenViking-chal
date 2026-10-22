@@ -185,10 +185,10 @@ Compiled Rule 的可选模型与生命周期配置：
 
 | 字段 | 类型 / 可选值 | 默认值 | 作用 |
 |---|---|---|---|
-| `provider` | `typesafe`、`vercel`、`openrouter`、`volcengine`、`custom` | `typesafe` | 选择 endpoint、model 和必要请求头的默认值 |
+| `provider` | `typesafe`、`vercel`、`openrouter`、`custom` | `typesafe` | 选择 endpoint 和 model 默认值 |
 | `api_key` | string | 必填 | 所选 provider 的 API Key |
 | `api_base` | URL / `null` | provider 默认值 | 完整的 System One 请求 URL；显式配置的值会原样使用 |
-| `model` | string / `null` | provider 默认值 | 模型名或 Endpoint ID；`volcengine` 和 `custom` 必填 |
+| `model` | string / `null` | provider 默认值 | 模型名或 Endpoint ID；`custom` 必填 |
 | `timeout` | number | `30` | HTTP 请求超时秒数 |
 | `extra_headers` | object / `null` | `null` | 附加 HTTP 请求头 |
 | `log_payloads` | boolean | `false` | 是否记录完整请求和响应；日志可能包含任务与 Rule 内容 |
@@ -198,7 +198,6 @@ Compiled Rule 的可选模型与生命周期配置：
 | `typesafe` | `https://api.typesafe.ai/v1/systemone` | `jev-latest` | TypeSafe 直连 |
 | `vercel` | `https://ai-gateway.vercel.sh/typesafe/v1/systemone` | `typesafe-ai/jev` | Vercel AI Gateway 的 TypeSafe 兼容 API |
 | `openrouter` | `https://openrouter.ai/api/v1/systemone` | `jev-latest` | OpenRouter System One API |
-| `volcengine` | `https://ark.cn-beijing.volces.com/api/v1/systemone` | 无 | 必须配置 `model`；自动添加 `ark-beta-systemone-api: true` |
 | `custom` | 无 | 无 | 必须同时配置 `api_base` 和 `model` |
 
 `api_base` 和 `model` 可分别覆盖 provider 默认值。显式配置的 `api_base` 是完整
@@ -207,9 +206,6 @@ POST URL，任何 provider（包括 `custom`）都不会修改它或追加后缀
 独立 Noul 判断，因此不再包含 `mode`、`threshold` 或 `max_input_tokens` 配置。
 Scenario 过滤阈值由 `rules.scenario_irrelevance_threshold` 配置；
 Rule 适用性使用 Rule 搜索请求中的 `rule_probability_threshold`（默认 `0.65`）。
-
-迁移期间仍接受旧的 `provider: "jev"` 和 `mode: "noul"` 配置；新配置应明确选择
-上表中的 provider。
 
 Rule 状态为 `active`、`paused`、`archived`。`PAUSE` 暂停检索但不设置清理期限；
 `ARCHIVE` 从 `archived_at` 开始计算保留期；`RESTORE` 可恢复两种状态为 active，
@@ -243,7 +239,7 @@ Compiler 会优先忠实提炼原文中的对象、操作、前提和场景，�
 
 Rerank 没有单独的 `enabled` 字段；配置了对应 provider 所需的凭证后才会启用。
 
-`jev` 通过现有 `api_base` 和 `model` 字段同时支持 TypeSafe 直连（`https://api.typesafe.ai/v1/systemone`，模型 `jev-latest`）和 Vercel AI Gateway 的 TypeSafe 兼容端点（`https://ai-gateway.vercel.sh/typesafe/v1/systemone`，模型 `typesafe-ai/jev`），两者协议相同。`api_base` 会被视为完整请求 URL，不会被修改。默认 `noul` 模式独立评估每个候选；可选的 `choice` 模式横向比较所有候选并返回相对概率，使用时应将 `threshold` 设为 `0`。显式指定 `provider` 时必须提供该 provider 所需的凭证：`vikingdb` 需要 `ak` 和 `sk`，`cohere` 和 `jev` 需要 `api_key`，`openai` 需要 `api_key` 和 `api_base`，`litellm` 需要 `model`。凭证不全的配置在加载时即被拒绝。
+`jev` 通过现有 `api_base` 和 `model` 字段同时支持 TypeSafe 直连（`https://api.typesafe.ai/v1/systemone`，模型 `jev-latest`）和 Vercel AI Gateway 的 TypeSafe 兼容端点（`https://ai-gateway.vercel.sh/typesafe/v1/systemone`，模型 `typesafe-ai/jev`），两者协议相同。Rerank 的 `api_base` 可以是服务根地址或完整 System One URL；缺少 `/v1/systemone` 时会自动追加。默认 `noul` 模式独立评估每个候选；可选的 `choice` 模式横向比较所有候选并返回相对概率，使用时应将 `threshold` 设为 `0`。显式指定 `provider` 时必须提供该 provider 所需的凭证：`vikingdb` 需要 `ak` 和 `sk`，`cohere` 和 `jev` 需要 `api_key`，`openai` 需要 `api_key` 和 `api_base`，`litellm` 需要 `model`。凭证不全的配置在加载时即被拒绝。
 
 ## 检索配置
 

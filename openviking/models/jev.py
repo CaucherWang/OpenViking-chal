@@ -6,7 +6,8 @@ from typing import Dict, Tuple
 
 MODE_NOUL = "noul"
 MODE_CHOICE = "choice"
-DEFAULT_SYSTEM_ONE_URL = "https://api.typesafe.ai/v1/systemone"
+DEFAULT_SYSTEM_ONE_API_BASE = "https://api.typesafe.ai"
+DEFAULT_SYSTEM_ONE_URL = f"{DEFAULT_SYSTEM_ONE_API_BASE}/v1/systemone"
 
 
 def resolve_jev_target(config) -> Tuple[str, str, Dict[str, str]]:
@@ -18,7 +19,7 @@ def resolve_jev_target(config) -> Tuple[str, str, Dict[str, str]]:
             config.resolved_extra_headers(),
         )
 
-    api_base = config.api_base or DEFAULT_SYSTEM_ONE_URL
+    api_base = config.api_base or DEFAULT_SYSTEM_ONE_API_BASE
     default_model = "typesafe-ai/jev" if "ai-gateway.vercel.sh" in api_base else "jev-latest"
     return api_base, config.model or default_model, dict(config.extra_headers or {})
 
