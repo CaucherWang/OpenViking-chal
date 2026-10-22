@@ -36,6 +36,7 @@ from openviking.service.search_service import SearchService
 from openviking.service.task_tracker import TaskRecord, TaskStatus, get_task_tracker
 from openviking.service.task_work_index import bind_task_context
 from openviking.session.memory.utils.memory_fields import strip_memory_fields_trailer
+from openviking.utils.time_utils import get_current_timestamp, parse_iso_datetime
 from openviking.utils.token_estimation import estimate_text_tokens
 from openviking_cli.exceptions import (
     InvalidArgumentError,
@@ -97,16 +98,11 @@ def _validate_text_source(source: AddResourceRequest) -> None:
             )
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _parse_timestamp(value: str) -> datetime | None:
     if not value:
         return None
-    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:
-        parsed = datetime.fromisoformat(normalized)
+        parsed = parse_iso_datetime(value)
     except ValueError:
         return None
     if parsed.tzinfo is None:
@@ -1906,7 +1902,7 @@ existing_rules:
         ) -> StoredRule:
             rule_uri = uri or f"{root}/{scenario_id}/{atomic_id}.md"
             merged_sources = list(dict.fromkeys([*(prior_sources or []), *source_uris]))
-            updated_at = _now()
+            updated_at = get_current_timestamp()
             metadata = {
                 "schema": RULE_SCHEMA,
                 "atomic_id": atomic_id,
@@ -2105,7 +2101,7 @@ existing_rules:
                 "scenario_id": scenario.scenario_id,
                 "name": scenario.name,
                 "description": scenario.description,
-                "updated_at": _now(),
+                "updated_at": get_current_timestamp(),
             }
             lines = [f"# {scenario.name}", "", scenario.description]
             content = _render_markdown(metadata, "\n".join(lines))
