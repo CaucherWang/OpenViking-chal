@@ -26,7 +26,7 @@ from openviking.service.resource_service import ResourceService
 from openviking.service.rule_jev import (
     RuleJevClient,
     RuleJevInput,
-    create_rule_jev_judge,
+    ScenarioJevClient,
 )
 from openviking.service.rule_resource_ingest import (
     AddResourceRequest,
@@ -1297,7 +1297,6 @@ class RuleService:
             else 0.9
         )
         config = self._rules_config.jev_rule_matcher if self._rules_config is not None else None
-        provider = config._effective_provider() if config is not None else None
         base_report: dict[str, Any] = {
             "backend": "disabled",
             "irrelevance_threshold": threshold,
@@ -1306,12 +1305,7 @@ class RuleService:
             "skipped_scenario_ids": [],
             "decisions": [],
         }
-        if (
-            config is None
-            or provider != "jev"
-            or getattr(config, "mode", None) != "noul"
-            or not config.is_available()
-        ):
+        if config is None or not config.is_available():
             base_report["decisions"] = [
                 {
                     "scenario_id": scenario.scenario_id,
@@ -1323,21 +1317,7 @@ class RuleService:
             return scenarios, base_report
 
         try:
-            client = create_rule_jev_judge(
-                config,
-                question=(
-                    "Is candidate_documents[candidate_index] completely unrelated "
-                    "to the current task context in query?"
-                ),
-                true_criterion=(
-                    "The Scenario has no plausible connection to the current task, "
-                    "object, operation, evidence, or scenario."
-                ),
-                false_criterion=(
-                    "The Scenario is relevant, may apply, or there is any uncertainty "
-                    "about whether it could apply."
-                ),
-            )
+            client = ScenarioJevClient.from_config(config)
         except Exception as exc:  # noqa: BLE001 - an unavailable judge must pass
             logger.warning("Jev Scenario filter unavailable: %s", exc)
             client = None
@@ -1367,7 +1347,7 @@ class RuleService:
                 batch = scenarios[start : start + MAX_SCENARIOS_PER_MATCHER_BATCH]
                 try:
                     scores = await asyncio.to_thread(
-                        client.rerank_batch,
+                        client.judge_scenarios,
                         task_context,
                         [_render_scenario_for_judge(scenario) for scenario in batch],
                     )

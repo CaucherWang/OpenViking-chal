@@ -157,11 +157,8 @@ Optional models and lifecycle settings for compiled Rules:
 {
   "rules": {
     "jev_rule_matcher": {
-      "provider": "jev",
-      "api_key": "${JEV_API_KEY}",
-      "api_base": "https://api.typesafe.ai",
-      "model": "jev-latest",
-      "mode": "noul"
+      "provider": "typesafe",
+      "api_key": "${JEV_API_KEY}"
     },
     "compiler": {
       "provider": "openai",
@@ -189,21 +186,32 @@ filtering and Rule applicability. It does not configure retrieval reranking.
 
 | Field | Type / values | Default | Purpose |
 |---|---|---|---|
-| `provider` | `"jev"` | required | Select the Jev provider; no other provider is accepted here |
-| `api_key` | string | required | TypeSafe or compatible gateway API key |
-| `api_base` | URL | `https://api.typesafe.ai` | Jev-compatible endpoint root; `/v1/systemone` is appended when absent |
-| `model` | string | endpoint-specific | Model sent to Jev; defaults to `jev-latest` for TypeSafe and `typesafe-ai/jev` for Vercel AI Gateway |
-| `mode` | `"noul"` | `"noul"` | Independent probability mode; `choice` is not accepted for Rule matching |
+| `provider` | `typesafe`, `vercel`, `openrouter`, `volcengine`, `custom` | `typesafe` | Select endpoint, model, and required-header defaults |
+| `api_key` | string | required | API key for the selected provider |
+| `api_base` | URL / `null` | provider default | Complete System One request URL; an explicit value is used unchanged |
+| `model` | string / `null` | provider default | Model name or endpoint ID; required for `volcengine` and `custom` |
 | `timeout` | number | `30` | HTTP request timeout in seconds |
 | `extra_headers` | object / `null` | `null` | Additional HTTP request headers |
 | `log_payloads` | boolean | `false` | Log complete requests and responses; these may contain task and Rule content |
 
-For Vercel AI Gateway, set `api_base` to
-`https://ai-gateway.vercel.sh/typesafe` and `model` to `typesafe-ai/jev`.
-The shared configuration schema also exposes `threshold` and `max_input_tokens`, but
-the Rule Jev matcher does not use them. Configure Scenario filtering with
+| Provider | Default request URL | Default model | Notes |
+|---|---|---|---|
+| `typesafe` | `https://api.typesafe.ai/v1/systemone` | `jev-latest` | Direct TypeSafe access |
+| `vercel` | `https://ai-gateway.vercel.sh/typesafe/v1/systemone` | `typesafe-ai/jev` | Vercel AI Gateway TypeSafe-compatible API |
+| `openrouter` | `https://openrouter.ai/api/v1/systemone` | `jev-latest` | OpenRouter System One API |
+| `volcengine` | `https://ark.cn-beijing.volces.com/api/v1/systemone` | none | Requires `model`; adds `ark-beta-systemone-api: true` |
+| `custom` | none | none | Requires both `api_base` and `model` |
+
+`api_base` and `model` override provider defaults independently. An explicit
+`api_base` is the complete POST URL and is never modified, including for `custom`.
+`extra_headers` extends provider headers and can override a provider default.
+Rule matching always uses independent Noul judgments, so it has no `mode`,
+`threshold`, or `max_input_tokens` setting. Configure Scenario filtering with
 `rules.scenario_irrelevance_threshold`; Rule applicability uses the threshold supplied
 as `rule_probability_threshold` in the Rule search request (default `0.65`).
+
+For migration, legacy `provider: "jev"` and `mode: "noul"` configurations remain
+accepted. New configurations should select a provider above.
 
 Rule status is `active`, `paused`, or `archived`. `PAUSE` suspends retrieval without
 expiry; `ARCHIVE` starts retention from `archived_at`. `RESTORE` reactivates either
@@ -213,9 +221,9 @@ Rules live directly in `memories/rules/<scenario_id>/`: `abstract.md` stores Sce
 metadata and `<atomic_id>.md` stores each Rule. See
 [Rule Scenarios](../concepts/17-rule-scenarios.md) for the storage format.
 
-`jev_rule_matcher` must use provider `jev` in `noul` mode. When Jev is unconfigured,
-unavailable, fails, or returns invalid results, Scenario and Rule judgments pass
-the candidates without calling a VLM. Scenario diagnostics record `decision=pass`.
+When `jev_rule_matcher` is unconfigured, unavailable, fails, or returns invalid
+results, Scenario and Rule judgments pass the candidates without calling a VLM.
+Scenario diagnostics record `decision=pass`.
 Rules return `judge=pass`, a warning, and score `1.0` to pass the threshold; this score
 is not a model-estimated applicability probability. Agents still check applicability
 and exceptions against task facts. Compilation falls back from `compiler` to the
@@ -241,7 +249,7 @@ discard source restrictions. Empty does not mean unknown or inapplicable.
 
 Rerank has no separate `enabled` field. It becomes available when the required provider credentials are configured.
 
-`jev` supports direct TypeSafe access (`https://api.typesafe.ai`, model `jev-latest`) and Vercel AI Gateway's TypeSafe-compatible endpoint (`https://ai-gateway.vercel.sh/typesafe`, model `typesafe-ai/jev`) through the existing `api_base` and `model` fields; both speak the same protocol. Its default `noul` mode scores each candidate independently. The optional `choice` mode compares all candidates and returns relative probabilities; set `threshold` to `0` when using it. Setting `provider` explicitly requires the credentials that provider needs: `ak` and `sk` for `vikingdb`, `api_key` for `cohere` and `jev`, `api_key` and `api_base` for `openai`, `model` for `litellm`. An incomplete block is rejected when the configuration loads.
+`jev` supports direct TypeSafe access (`https://api.typesafe.ai/v1/systemone`, model `jev-latest`) and Vercel AI Gateway's TypeSafe-compatible endpoint (`https://ai-gateway.vercel.sh/typesafe/v1/systemone`, model `typesafe-ai/jev`) through the existing `api_base` and `model` fields; both speak the same protocol. `api_base` is treated as the complete request URL and is not modified. Its default `noul` mode scores each candidate independently. The optional `choice` mode compares all candidates and returns relative probabilities; set `threshold` to `0` when using it. Setting `provider` explicitly requires the credentials that provider needs: `ak` and `sk` for `vikingdb`, `api_key` for `cohere` and `jev`, `api_key` and `api_base` for `openai`, `model` for `litellm`. An incomplete block is rejected when the configuration loads.
 
 ## Retrieval Settings
 
