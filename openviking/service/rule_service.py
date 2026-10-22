@@ -21,6 +21,10 @@ from openviking.core.uri_validation import validate_request_viking_uri
 from openviking.models.vlm.llm import parse_json_from_response
 from openviking.parse.parsers.media.constants import MEDIA_EXTENSIONS
 from openviking.server.identity import RequestContext
+from openviking.server.resource_ingest import (
+    AddResourceRequest,
+    ingest_resource_request,
+)
 from openviking.service.fs_service import FSService
 from openviking.service.resource_service import ResourceService
 from openviking.service.rule_jev import (
@@ -28,11 +32,8 @@ from openviking.service.rule_jev import (
     RuleJevInput,
     ScenarioJevClient,
 )
-from openviking.service.rule_resource_ingest import (
-    AddResourceRequest,
-    ingest_add_resource_request,
-)
 from openviking.service.search_service import SearchService
+from openviking.service.task_domain import TaskPatch
 from openviking.service.task_tracker import TaskRecord, TaskStatus, get_task_tracker
 from openviking.service.task_work_index import bind_task_context
 from openviking.session.memory.utils.memory_fields import strip_memory_fields_trailer
@@ -191,6 +192,22 @@ def _build_material_batches(
     *,
     max_tokens: int,
 ) -> list[tuple[str, str]]:
+    if instruction and source_text:
+        # Instructions can restrict the authorized source scope, so every source batch needs it.
+        source_budget = max_tokens - estimate_text_tokens(instruction)
+        if source_budget <= 0:
+            raise InvalidArgumentError(
+                "rule compiler instruction leaves no room for source material"
+            )
+        batches: list[tuple[str, str]] = []
+        remaining_source = source_text
+        while remaining_source:
+            chunk, remaining_source = _take_text_prefix(remaining_source, source_budget)
+            if not chunk:
+                raise InvalidArgumentError("rule compiler input budget is too small")
+            batches.append((instruction, chunk))
+        return batches
+
     pending = [
         [kind, text]
         for kind, text in (("instruction", instruction), ("source", source_text))
@@ -532,9 +549,9 @@ class RuleService:
                 }
             },
         )
-        await tracker.update_stage(
+        await tracker.patch_task(
             task.task_id,
-            "queued",
+            TaskPatch(stage="queued"),
             account_id=ctx.account_id,
             user_id=ctx.user.user_id,
         )
@@ -616,9 +633,9 @@ class RuleService:
         await self._ensure_rule_directories(ctx)
         source_text, source_uris = await self._collect_sources(request, ctx)
         tracker = get_task_tracker()
-        await tracker.update_stage(
+        await tracker.patch_task(
             task_id,
-            "recalling_rules",
+            TaskPatch(stage="recalling_rules"),
             account_id=ctx.account_id,
             user_id=ctx.user.user_id,
         )
@@ -646,9 +663,9 @@ class RuleService:
             source_text,
             max_tokens=material_token_limit,
         )
-        await tracker.update_stage(
+        await tracker.patch_task(
             task_id,
-            "planning_operations",
+            TaskPatch(stage="planning_operations"),
             account_id=ctx.account_id,
             user_id=ctx.user.user_id,
         )
@@ -716,23 +733,26 @@ class RuleService:
             batch_writes = applied.pop("_writes")
             accumulated_writes.update(batch_writes)
             written_uris = set(accumulated_writes)
-            working_scenarios = {
-                scenario.scenario_id: scenario
-                for scenario in batch_scenarios
-                if scenario.uri in written_uris
-            }
             working_rules = {
                 rule.atomic_id: rule
                 for rule in batch_rules
                 if rule.uri in written_uris and rule.status in COMPILER_RULE_STATUSES
             }
+            working_rule_scenario_ids = {rule.scenario_id for rule in working_rules.values()}
+            working_scenarios = {
+                scenario.scenario_id: scenario
+                for scenario in batch_scenarios
+                if scenario.uri in written_uris
+                or scenario.scenario_id in working_rule_scenario_ids
+                or scenario.scenario_id in working_scenarios
+            }
             operations.extend(applied["operations"])
             if plan.reason:
                 plan_reasons.append(plan.reason)
 
-        await tracker.update_stage(
+        await tracker.patch_task(
             task_id,
-            "writing_rules",
+            TaskPatch(stage="writing_rules"),
             account_id=ctx.account_id,
             user_id=ctx.user.user_id,
         )
@@ -1118,13 +1138,13 @@ class RuleService:
                 add_request = source.model_copy(
                     update=updates,
                 )
-                result = await ingest_add_resource_request(
+                result = await ingest_resource_request(
                     add_request,
                     ctx,
                     resources=resources,
                     config=self._config,
-                    force_wait=False if declared_connector else True,
-                    force_internal_task=True,
+                    wait=False if declared_connector else True,
+                    internal_task=True,
                 )
                 terminal: TaskRecord | None = None
                 if result.get("status") == "accepted":
@@ -1867,7 +1887,7 @@ existing_rules:
         rules = {rule.atomic_id: rule for rule in existing_rules}
         writes: dict[str, str] = {}
         outcomes: list[dict[str, Any]] = []
-        touched_scenarios: set[str] = set()
+        scenarios_to_write: set[str] = set()
         reserved_ids = set(rules) | {"abstract"}
         if any(mutation.operation in {"NEW", "REPLACE"} for mutation in plan.mutations):
             inventory = await fs.glob("*/*.md", ctx=ctx, uri=root)
@@ -1929,7 +1949,6 @@ existing_rules:
             )
             rules[atomic_id] = stored
             writes[rule_uri] = content
-            touched_scenarios.add(scenario_id)
             return stored
 
         async def resolve_scenario(ref: RuleScenarioRef) -> StoredScenario:
@@ -1956,7 +1975,7 @@ existing_rules:
                 content="",
             )
             scenarios[scenario_id] = scenario
-            touched_scenarios.add(scenario_id)
+            scenarios_to_write.add(scenario_id)
             return scenario
 
         def new_id(record: RuleRecord) -> str:
@@ -2094,7 +2113,7 @@ existing_rules:
         for mutation in plan.mutations:
             await apply(mutation)
 
-        for scenario_id in touched_scenarios:
+        for scenario_id in scenarios_to_write:
             scenario = scenarios[scenario_id]
             metadata = {
                 "schema": SCENARIO_SCHEMA,
