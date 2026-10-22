@@ -5,18 +5,20 @@
 import json
 import time
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, TypeVar
 
 import httpx
 
-from openviking.models.rerank.jev_rerank import (
+from openviking.models.jev import (
     MODE_NOUL,
-    JevRerankClient,
-    NoulRerankMode,
+    resolve_jev_target,
+    validate_jev_probability,
 )
 from openviking_cli.utils import get_logger
 
 logger = get_logger(__name__)
+
+JevJudgeClientT = TypeVar("JevJudgeClientT", bound="_JevJudgeClient")
 
 
 @dataclass(frozen=True)
@@ -39,39 +41,82 @@ class RuleJevScore:
     exception: float
 
 
-def _validate_probability(value: object) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
-        raise ValueError(f"Invalid Rule Jev probability: {value!r}")
-    return float(value)
+class _JevJudgeClient:
+    """Shared System One transport for Rule-domain judgments."""
 
-
-class RuleJevClient:
-    """Jev client for Rule applicability, independent of document reranking."""
+    log_name = "JevJudge"
 
     def __init__(self, config) -> None:
-        api_base = (config.api_base or "https://api.typesafe.ai").rstrip("/")
-        self.api_url = (
-            api_base if api_base.endswith("/v1/systemone") else f"{api_base}/v1/systemone"
-        )
-        default_model = "typesafe-ai/jev" if "ai-gateway.vercel.sh" in api_base else "jev-latest"
-        self.model_name = config.model or default_model
+        self.api_url, self.model_name, extra_headers = resolve_jev_target(config)
         self.log_payloads = config.log_payloads
         self._client = httpx.Client(
             headers={
                 "Authorization": f"Bearer {config.api_key}",
                 "Content-Type": "application/json",
-                **dict(config.extra_headers or {}),
+                **extra_headers,
             },
             timeout=config.timeout,
         )
 
     @classmethod
-    def from_config(cls, config) -> "RuleJevClient | None":
+    def from_config(
+        cls: type[JevJudgeClientT],
+        config,
+    ) -> JevJudgeClientT | None:
         if not config or not config.is_available():
             return None
-        if config._effective_provider() != "jev" or config.mode != MODE_NOUL:
-            raise ValueError("Rule Jev judgments require provider='jev' and mode='noul'")
+        mode = getattr(config, "mode", MODE_NOUL)
+        if mode != MODE_NOUL:
+            raise ValueError("Rule-domain Jev judgments require mode='noul'")
         return cls(config)
+
+    def _request_answers(self, body: dict, *, item_count: int) -> dict | None:
+        try:
+            if self.log_payloads:
+                logger.warning(
+                    "[%s] Request items=%s payload=%s",
+                    self.log_name,
+                    item_count,
+                    json.dumps(body, ensure_ascii=False),
+                )
+            started = time.monotonic()
+            response = self._client.post(self.api_url, json=body)
+            duration_seconds = time.monotonic() - started
+            response.raise_for_status()
+            data = response.json()
+            if self.log_payloads:
+                logger.warning(
+                    "[%s] Response status=%s duration_ms=%.1f payload=%s",
+                    self.log_name,
+                    response.status_code,
+                    duration_seconds * 1000,
+                    json.dumps(data, ensure_ascii=False),
+                )
+            answers = data.get("answers")
+            if not isinstance(answers, dict):
+                logger.warning("[%s] Response has no answers object", self.log_name)
+                return None
+            return answers
+        except httpx.HTTPStatusError as error:
+            logger.error(
+                "[%s] API error: %s %s",
+                self.log_name,
+                error.response.status_code,
+                error.response.text,
+            )
+            return None
+        except Exception as error:
+            logger.error("[%s] Judgment failed: %s", self.log_name, error)
+            return None
+
+    def close(self) -> None:
+        self._client.close()
+
+
+class RuleJevClient(_JevJudgeClient):
+    """Jev client for Rule applicability and exception judgments."""
+
+    log_name = "RuleJev"
 
     @staticmethod
     def _questions(rules: List[RuleJevInput]) -> Dict[str, dict]:
@@ -121,7 +166,7 @@ class RuleJevClient:
         answer = answers[key]
         if not isinstance(answer, dict) or answer.get("type") != MODE_NOUL:
             raise ValueError(f"Missing or malformed Rule Jev answer: {key}")
-        return _validate_probability(answer.get("noul"))
+        return validate_jev_probability(answer.get("noul"), label="Rule Jev probability")
 
     def judge_rules(
         self,
@@ -141,29 +186,10 @@ class RuleJevClient:
             },
             "questions": questions,
         }
+        answers = self._request_answers(body, item_count=len(rules))
+        if answers is None:
+            return None
         try:
-            if self.log_payloads:
-                logger.warning(
-                    "[RuleJev] Request rules=%s payload=%s",
-                    len(rules),
-                    json.dumps(body, ensure_ascii=False),
-                )
-            started = time.monotonic()
-            response = self._client.post(self.api_url, json=body)
-            duration_seconds = time.monotonic() - started
-            response.raise_for_status()
-            data = response.json()
-            if self.log_payloads:
-                logger.warning(
-                    "[RuleJev] Response status=%s duration_ms=%.1f payload=%s",
-                    response.status_code,
-                    duration_seconds * 1000,
-                    json.dumps(data, ensure_ascii=False),
-                )
-            answers = data.get("answers")
-            if not isinstance(answers, dict):
-                logger.warning("[RuleJev] Response has no answers object")
-                return None
             return [
                 RuleJevScore(
                     applies_when=self._answer(
@@ -181,86 +207,81 @@ class RuleJevClient:
                 )
                 for index, rule in enumerate(rules)
             ]
-        except httpx.HTTPStatusError as error:
-            logger.error(
-                "[RuleJev] API error: %s %s",
-                error.response.status_code,
-                error.response.text,
-            )
-            return None
         except Exception as error:
-            logger.error("[RuleJev] Judgment failed: %s", error)
+            logger.error("[RuleJev] Invalid answers: %s", error)
             return None
 
-    def close(self) -> None:
-        self._client.close()
 
+class ScenarioJevClient(_JevJudgeClient):
+    """Jev client for deciding whether recalled Scenarios are unrelated."""
 
-class _RuleNoulMode(NoulRerankMode):
-    def __init__(
-        self,
-        *,
-        question: str,
-        true_criterion: str,
-        false_criterion: str,
-    ) -> None:
-        self._question = question
-        self._true_criterion = true_criterion
-        self._false_criterion = false_criterion
+    log_name = "ScenarioJev"
 
-    def build_questions(self, documents: List[str]) -> Dict[str, dict]:
+    @staticmethod
+    def _questions(scenarios: List[str]) -> Dict[str, dict]:
         return {
-            f"relevance_{index}": {
+            f"unrelated_{index}": {
                 "type": MODE_NOUL,
                 "instructions": {
-                    "candidate_index": index,
-                    "question": self._question,
+                    "scenario_index": index,
+                    "question": (
+                        "Is scenarios[scenario_index] completely unrelated to task_context?"
+                    ),
                 },
                 "criteria": {
-                    "true": self._true_criterion,
-                    "false": self._false_criterion,
+                    "true": (
+                        "The Scenario has no plausible connection to the current task, "
+                        "object, operation, evidence, or situation."
+                    ),
+                    "false": (
+                        "The Scenario is relevant, may apply, or there is any uncertainty "
+                        "about whether it could apply."
+                    ),
                 },
             }
-            for index in range(len(documents))
+            for index in range(len(scenarios))
         }
 
-
-def _create_rule_jev_client(config) -> JevRerankClient | None:
-    client = JevRerankClient.from_config(config)
-    if client is None:
-        return None
-    if client.mode != MODE_NOUL:
-        client.close()
-        raise ValueError("Rule Jev judgments require mode='noul'")
-    extra_headers = dict(getattr(config, "extra_headers", None) or {})
-    if extra_headers:
-        client._client.headers.update(extra_headers)  # noqa: SLF001 - isolated adapter hook
-    return client
-
-
-def create_rule_jev_judge(
-    config,
-    *,
-    question: str,
-    true_criterion: str,
-    false_criterion: str,
-) -> JevRerankClient | None:
-    """Build an isolated Jev client with a Rule-specific Noul question."""
-    client = _create_rule_jev_client(config)
-    if client is None:
-        return None
-
-    client._strategy = _RuleNoulMode(  # noqa: SLF001 - isolated adapter hook
-        question=question,
-        true_criterion=true_criterion,
-        false_criterion=false_criterion,
-    )
-    return client
+    def judge_scenarios(
+        self,
+        task_context: str,
+        scenarios: List[str],
+    ) -> List[float] | None:
+        if not scenarios:
+            return []
+        body = {
+            "model": self.model_name,
+            "state": {
+                "task_context": task_context,
+                "scenarios": scenarios,
+            },
+            "questions": self._questions(scenarios),
+        }
+        answers = self._request_answers(body, item_count=len(scenarios))
+        if answers is None:
+            return None
+        try:
+            scores = []
+            for index in range(len(scenarios)):
+                key = f"unrelated_{index}"
+                answer = answers.get(key)
+                if not isinstance(answer, dict) or answer.get("type") != MODE_NOUL:
+                    raise ValueError(f"Missing or malformed Scenario Jev answer: {key}")
+                scores.append(
+                    validate_jev_probability(
+                        answer.get("noul"),
+                        label="Scenario irrelevance probability",
+                    )
+                )
+            return scores
+        except Exception as error:
+            logger.error("[ScenarioJev] Invalid answers: %s", error)
+            return None
 
 
 __all__ = [
     "RuleJevClient",
     "RuleJevInput",
     "RuleJevScore",
-    "create_rule_jev_judge",
+    "ScenarioJevClient",
 ]

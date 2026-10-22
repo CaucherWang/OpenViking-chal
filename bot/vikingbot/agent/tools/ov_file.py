@@ -597,13 +597,16 @@ class VikingRuleSearchTool(OVFileTool):
     @property
     def description(self) -> str:
         return (
-            "Search compiled OpenViking Rules for constraints applicable to a concrete task. "
-            "The backend returns complete Rule blocks with applies_when, exception, and an "
-            "application protocol. Evaluate every returned Rule against task facts; topic "
-            "similarity alone does not establish applicability, and Rules are not evidence "
-            "about the object being evaluated. Every Rule determined applicable by the backend "
-            "is returned in full and must be considered."
+            "Use this tool when a concrete task may be governed by OpenViking Rules. "
+            "It searches the rule set using the task context and returns every relevant Rule "
+            "the backend determines applicable, with complete applies_when, exception, and "
+            "application protocol details. Returned Rules must be strictly evaluated against "
+            "their applies_when, exception, and content."
         )
+
+    @property
+    def preserve_complete_result(self) -> bool:
+        return True
 
     @property
     def parameters(self) -> dict[str, Any]:

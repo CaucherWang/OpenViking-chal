@@ -6,7 +6,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-from .rerank_config import RerankConfig
+from .jev_config import JevConfig
 from .vlm_config import VLMConfig
 
 
@@ -35,7 +35,7 @@ class RulesConfig(BaseModel):
             "configuration and falls back to a conservative default"
         ),
     )
-    jev_rule_matcher: Optional[RerankConfig] = Field(
+    jev_rule_matcher: Optional[JevConfig] = Field(
         default=None,
         description="Optional Jev Noul model for independent rule applicability scoring",
     )
@@ -54,16 +54,9 @@ class RulesConfig(BaseModel):
     )
 
     @model_validator(mode="after")
-    def validate_jev_rule_matcher(self) -> "RulesConfig":
+    def validate_rules_config(self) -> "RulesConfig":
         if 0 < self.compiler_context_window < 2048:
             raise ValueError("rules.compiler_context_window must be 0 or at least 2048")
-        config = self.jev_rule_matcher
-        if config is None or not config.is_available():
-            return self
-        if config._effective_provider() != "jev":
-            raise ValueError("rules.jev_rule_matcher must use provider 'jev'")
-        if config.mode != "noul":
-            raise ValueError("rules.jev_rule_matcher must use mode 'noul'")
         return self
 
     def get_compiler(self) -> Optional[VLMConfig]:

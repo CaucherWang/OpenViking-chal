@@ -57,6 +57,7 @@ from .expiry_config import ExpiryConfig, ExpiryRedisConfig
 from .git_config import GitConfig, GitLocalConfig, GitS3Config
 from .glob_config import GlobConfig, GlobEngine
 from .grep_config import GrepConfig, GrepEngine
+from .jev_config import JevConfig
 from .log_config import LogConfig
 from .open_viking_config import (
     CompileApiConfig,
@@ -146,6 +147,7 @@ __all__ = [
     "GlobEngine",
     "GrepConfig",
     "GrepEngine",
+    "JevConfig",
     "RerankConfig",
     "RetrievalConfig",
     "RulesConfig",

@@ -36,7 +36,7 @@ from openviking_cli.exceptions import (
     VLMFailedError,
 )
 from openviking_cli.session.user_id import UserIdentifier
-from openviking_cli.utils.config.rerank_config import RerankConfig
+from openviking_cli.utils.config.jev_config import JevConfig
 from openviking_cli.utils.config.rules_config import RulesConfig
 from openviking_cli.utils.config.vlm_config import VLMConfig
 
@@ -390,7 +390,7 @@ async def test_jev_rule_matcher_scores_independent_applicability(monkeypatch):
         search=SimpleNamespace(),
         vlm_resolver=SimpleNamespace(get_vlm=AsyncMock()),
         rules_config=RulesConfig(
-            jev_rule_matcher=RerankConfig(provider="jev", api_key="key", mode="noul"),
+            jev_rule_matcher=JevConfig(provider="typesafe", api_key="key"),
         ),
     )
     monkeypatch.setattr(
@@ -455,7 +455,7 @@ async def test_jev_rule_matcher_failure_passes_all_candidates(monkeypatch):
         search=SimpleNamespace(),
         vlm_resolver=SimpleNamespace(get_vlm=AsyncMock()),
         rules_config=RulesConfig(
-            jev_rule_matcher=RerankConfig(provider="jev", api_key="key", mode="noul"),
+            jev_rule_matcher=JevConfig(provider="typesafe", api_key="key"),
         ),
     )
     monkeypatch.setattr(
@@ -492,7 +492,7 @@ async def test_invalid_jev_rule_responses_pass_all_rules_without_loading_vlm(mon
         search=SimpleNamespace(),
         vlm_resolver=resolver,
         rules_config=RulesConfig(
-            jev_rule_matcher=RerankConfig(provider="jev", api_key="key", mode="noul"),
+            jev_rule_matcher=JevConfig(provider="typesafe", api_key="key"),
         ),
     )
     client = SimpleNamespace(judge_rules=lambda *_: response, close=lambda: None)
@@ -559,7 +559,7 @@ async def test_search_passes_all_loaded_rules_at_threshold_one_when_jev_is_missi
 async def test_jev_rule_client_initialization_failure_passes_rules(monkeypatch):
     service = RuleService()
     service._rules_config = RulesConfig(
-        jev_rule_matcher=RerankConfig(provider="jev", api_key="key", mode="noul"),
+        jev_rule_matcher=JevConfig(provider="typesafe", api_key="key"),
     )
 
     def fail_initialization(_config):
@@ -580,9 +580,7 @@ async def test_jev_scenario_initialization_passes_every_candidate(monkeypatch, i
     service = RuleService()
     service._rules_config = RulesConfig(
         jev_rule_matcher=(
-            None
-            if initialization == "missing"
-            else RerankConfig(provider="jev", api_key="key", mode="noul")
+            None if initialization == "missing" else JevConfig(provider="typesafe", api_key="key")
         )
     )
 
@@ -591,7 +589,10 @@ async def test_jev_scenario_initialization_passes_every_candidate(monkeypatch, i
             raise RuntimeError("init failed")
         return None
 
-    monkeypatch.setattr("openviking.service.rule_service.create_rule_jev_judge", factory)
+    monkeypatch.setattr(
+        "openviking.service.rule_service.ScenarioJevClient",
+        SimpleNamespace(from_config=factory),
+    )
     scenarios = [
         StoredScenario(
             schema=SCENARIO_SCHEMA,
@@ -615,23 +616,22 @@ async def test_jev_scenario_filter_skips_only_high_confidence_completely_unrelat
             self.closed = False
             self.call = None
 
-        def rerank_batch(self, query, documents):
-            self.call = (query, documents)
+        def judge_scenarios(self, task_context, scenarios):
+            self.call = (task_context, scenarios)
             return [0.95, 0.4, 0.89]
 
         def close(self):
             self.closed = True
 
     client = _JevClient()
-    judge_config = {}
     service = RuleService()
     service._rules_config = RulesConfig(
-        jev_rule_matcher=RerankConfig(provider="jev", api_key="key", mode="noul"),
+        jev_rule_matcher=JevConfig(provider="typesafe", api_key="key"),
         scenario_irrelevance_threshold=0.9,
     )
     monkeypatch.setattr(
-        "openviking.service.rule_service.create_rule_jev_judge",
-        lambda config, **kwargs: judge_config.update(kwargs) or client,
+        "openviking.service.rule_service.ScenarioJevClient",
+        SimpleNamespace(from_config=lambda config: client),
     )
     scenarios = [
         StoredScenario(
@@ -651,9 +651,9 @@ async def test_jev_scenario_filter_skips_only_high_confidence_completely_unrelat
     assert report["skipped_scenario_ids"] == ["unrelated"]
     assert report["passed_scenario_ids"] == ["relevant", "uncertain"]
     assert report["irrelevance_threshold"] == 0.9
-    assert client.call is not None
-    assert "completely unrelated" in judge_config["question"]
-    assert "any uncertainty" in judge_config["false_criterion"]
+    assert client.call[0] == "current task"
+    assert len(client.call[1]) == 3
+    assert all("Scenario for" in scenario for scenario in client.call[1])
     assert client.closed is True
 
 
@@ -661,7 +661,7 @@ async def test_jev_scenario_filter_skips_only_high_confidence_completely_unrelat
 @pytest.mark.parametrize("response", [None, [], 0.9, [float("nan")], [True]])
 async def test_jev_scenario_filter_passes_all_scenarios_when_judgment_fails(monkeypatch, response):
     class _FailingJevClient:
-        def rerank_batch(self, query, documents):
+        def judge_scenarios(self, task_context, scenarios):
             return response
 
         def close(self):
@@ -669,11 +669,11 @@ async def test_jev_scenario_filter_passes_all_scenarios_when_judgment_fails(monk
 
     service = RuleService()
     service._rules_config = RulesConfig(
-        jev_rule_matcher=RerankConfig(provider="jev", api_key="key", mode="noul"),
+        jev_rule_matcher=JevConfig(provider="typesafe", api_key="key"),
     )
     monkeypatch.setattr(
-        "openviking.service.rule_service.create_rule_jev_judge",
-        lambda config, **kwargs: _FailingJevClient(),
+        "openviking.service.rule_service.ScenarioJevClient",
+        SimpleNamespace(from_config=lambda config: _FailingJevClient()),
     )
     scenarios = [
         StoredScenario(

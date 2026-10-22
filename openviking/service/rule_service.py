@@ -26,7 +26,7 @@ from openviking.service.resource_service import ResourceService
 from openviking.service.rule_jev import (
     RuleJevClient,
     RuleJevInput,
-    create_rule_jev_judge,
+    ScenarioJevClient,
 )
 from openviking.service.rule_resource_ingest import (
     AddResourceRequest,
@@ -36,6 +36,7 @@ from openviking.service.search_service import SearchService
 from openviking.service.task_tracker import TaskRecord, TaskStatus, get_task_tracker
 from openviking.service.task_work_index import bind_task_context
 from openviking.session.memory.utils.memory_fields import strip_memory_fields_trailer
+from openviking.utils.time_utils import get_current_timestamp, parse_iso_datetime
 from openviking.utils.token_estimation import estimate_text_tokens
 from openviking_cli.exceptions import (
     InvalidArgumentError,
@@ -97,16 +98,11 @@ def _validate_text_source(source: AddResourceRequest) -> None:
             )
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _parse_timestamp(value: str) -> datetime | None:
     if not value:
         return None
-    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:
-        parsed = datetime.fromisoformat(normalized)
+        parsed = parse_iso_datetime(value)
     except ValueError:
         return None
     if parsed.tzinfo is None:
@@ -1297,7 +1293,6 @@ class RuleService:
             else 0.9
         )
         config = self._rules_config.jev_rule_matcher if self._rules_config is not None else None
-        provider = config._effective_provider() if config is not None else None
         base_report: dict[str, Any] = {
             "backend": "disabled",
             "irrelevance_threshold": threshold,
@@ -1306,12 +1301,7 @@ class RuleService:
             "skipped_scenario_ids": [],
             "decisions": [],
         }
-        if (
-            config is None
-            or provider != "jev"
-            or getattr(config, "mode", None) != "noul"
-            or not config.is_available()
-        ):
+        if config is None or not config.is_available():
             base_report["decisions"] = [
                 {
                     "scenario_id": scenario.scenario_id,
@@ -1323,21 +1313,7 @@ class RuleService:
             return scenarios, base_report
 
         try:
-            client = create_rule_jev_judge(
-                config,
-                question=(
-                    "Is candidate_documents[candidate_index] completely unrelated "
-                    "to the current task context in query?"
-                ),
-                true_criterion=(
-                    "The Scenario has no plausible connection to the current task, "
-                    "object, operation, evidence, or scenario."
-                ),
-                false_criterion=(
-                    "The Scenario is relevant, may apply, or there is any uncertainty "
-                    "about whether it could apply."
-                ),
-            )
+            client = ScenarioJevClient.from_config(config)
         except Exception as exc:  # noqa: BLE001 - an unavailable judge must pass
             logger.warning("Jev Scenario filter unavailable: %s", exc)
             client = None
@@ -1367,7 +1343,7 @@ class RuleService:
                 batch = scenarios[start : start + MAX_SCENARIOS_PER_MATCHER_BATCH]
                 try:
                     scores = await asyncio.to_thread(
-                        client.rerank_batch,
+                        client.judge_scenarios,
                         task_context,
                         [_render_scenario_for_judge(scenario) for scenario in batch],
                     )
@@ -1926,7 +1902,7 @@ existing_rules:
         ) -> StoredRule:
             rule_uri = uri or f"{root}/{scenario_id}/{atomic_id}.md"
             merged_sources = list(dict.fromkeys([*(prior_sources or []), *source_uris]))
-            updated_at = _now()
+            updated_at = get_current_timestamp()
             metadata = {
                 "schema": RULE_SCHEMA,
                 "atomic_id": atomic_id,
@@ -2125,7 +2101,7 @@ existing_rules:
                 "scenario_id": scenario.scenario_id,
                 "name": scenario.name,
                 "description": scenario.description,
-                "updated_at": _now(),
+                "updated_at": get_current_timestamp(),
             }
             lines = [f"# {scenario.name}", "", scenario.description]
             content = _render_markdown(metadata, "\n".join(lines))

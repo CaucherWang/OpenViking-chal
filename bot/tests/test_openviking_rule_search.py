@@ -37,14 +37,18 @@ async def test_rule_search_tool_submits_context_and_options(monkeypatch):
     }
     tool = VikingRuleSearchTool()
     monkeypatch.setattr(tool, "_get_client", AsyncMock(return_value=client))
+    registry = ToolRegistry()
+    registry.register(tool)
 
-    result = await tool.execute(
-        ToolContext(),
-        task_context="Delete a generated file.",
+    outcome = await registry.execute_detailed(
+        tool.name,
+        {"task_context": "Delete a generated file."},
+        SessionKey(type="test", channel_id="channel", chat_id="chat"),
     )
 
     client.rule_search.assert_awaited_once_with("Delete a generated file.")
-    assert result == "# Applicable OpenViking Rules\n\n## [confirm-delete@1]"
+    assert outcome.result == "# Applicable OpenViking Rules\n\n## [confirm-delete@1]"
+    assert outcome.preserve_complete_result is True
 
 
 @pytest.mark.asyncio
@@ -64,12 +68,13 @@ async def test_rule_search_tool_falls_back_for_older_server(monkeypatch):
 @pytest.mark.asyncio
 async def test_rule_search_result_bypasses_generic_tool_preview_truncation():
     loop = object.__new__(AgentLoop)
+    tool = VikingRuleSearchTool()
     complete_rules = "complete-rule\n" * 1_000
 
     result = await loop._preview_tool_result(
         complete_rules,
         SessionKey(type="test", channel_id="channel", chat_id="chat"),
-        preserve_complete=True,
+        preserve_complete=tool.preserve_complete_result,
     )
 
     assert result == complete_rules
