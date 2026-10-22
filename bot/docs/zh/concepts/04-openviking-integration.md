@@ -154,8 +154,7 @@ Experience 保存 Agent 过去完成任务时形成的可复用方法。VikingBo
 
 OpenViking 工具通过 ToolContext 获得当前 actor peer 和 request-scoped connection。检索默认覆盖当前身份允许访问的资源、Peer 记忆和 Skill 路径。
 
-`openviking_rule_search` 是只读工具，在 `readonly` 模式中仍会注册；返回结果是约束，
-不是被评估对象的事实证据。`openviking_add_resource` 是异步资源处理操作；
+`openviking_rule_search` 是规则搜索工具，只读，在 `readonly` 模式中会注册。`openviking_add_resource` 是异步资源处理操作；
 `readonly` 模式不注册该工具。`openviking_memory_commit` 适用于用户明确要求“记住”
 某项信息的场景。
 

@@ -154,11 +154,10 @@ When a channel enables `ov_tools_enable`, the Agent can use:
 
 OpenViking tools obtain the current actor peer and request-scoped connection through ToolContext. Retrieval covers Resources, Peer Memories, and Skill paths accessible to the current identity.
 
-`openviking_rule_search` is read-only and remains available in `readonly` mode. Its
-results are constraints, not evidence about the object being evaluated.
-`openviking_add_resource` starts asynchronous resource processing and is not registered
-in `readonly` mode. `openviking_memory_commit` is intended for cases where the user
-explicitly asks the Agent to remember something.
+`openviking_rule_search` is a read-only Rule search tool and is registered in `readonly`
+mode. `openviking_add_resource` starts asynchronous resource processing and is not
+registered in `readonly` mode. `openviking_memory_commit` is intended for cases where
+the user explicitly asks the Agent to remember something.
 
 ## Using Remote Skills
 

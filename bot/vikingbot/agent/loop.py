@@ -2139,7 +2139,7 @@ class AgentLoop:
                     model_result = await self._preview_tool_result(
                         result,
                         session_key,
-                        preserve_complete=tool_call.name == "openviking_rule_search",
+                        preserve_complete=getattr(outcome, "preserve_complete_result", False),
                     )
                     recorded_result = (
                         result_text if isinstance(result, MultimodalToolResult) else model_result
