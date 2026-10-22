@@ -14,27 +14,69 @@ OpenViking Rules, then verify the task result and saved Rules.
 
 1. Identify the user's rule text or policy sources and the intended OpenViking connection.
    Use the same instance and identity for upload, compilation, task polling, and verification.
-2. Build a request with top-level `instruction` and `sources`; at least one must be non-empty.
+2. Choose exactly one invocation mode for the entire workflow:
+   - **Python SDK mode**: use when the Agent runs in Python and the OpenViking SDK is
+     available. Use SDK methods for source upload, compilation, task polling, and reading.
+   - **HTTP mode**: use for other languages or general-purpose Agents. Use HTTP endpoints
+     for source upload, compilation, task polling, and reading.
+   Do not mix SDK calls and direct HTTP calls within one compilation workflow.
+3. Build a request with top-level `instruction` and `sources`; at least one must be non-empty.
    Preserve the source's obligations, applicability conditions, exceptions, thresholds,
    and identifiers without inventing policy.
-3. Prepare each source using the appropriate form:
-   - Existing Resource: `{"resource_uri": "viking://resources/team-policy"}`.
-   - Remote text source: `{"path": "https://example.org/policy.md"}`.
-   - Local file or directory: use the Python SDK to upload it, or upload through
-     `POST /api/v1/resources/temp_upload` and submit the returned `temp_file_id`.
-     Do not send a client-local filesystem path directly to the compile HTTP endpoint.
-4. Submit `POST /api/v1/rules/compile`, or call
-   `client.rule_compile(instruction, options={"sources": sources})` with the Python SDK.
-   SDK sources may also be local path strings, URLs, or Resource URI strings.
-   Save the returned `task_id`; HTTP 202 means accepted, not completed.
-5. Poll `GET /api/v1/tasks/{task_id}` or `client.get_task(task_id)` until completed,
-   failed, or cancelled. Query the existing task rather than resubmitting the request.
+4. Continue only with the selected mode and use its exact parameter shape:
+
+   **Python SDK mode**
+
+   `options` supports `sources`. Each source may be a local file or directory path, a
+   remote URL, a Resource URI, or an advanced source dictionary. The SDK uploads local
+   paths automatically.
+
+   ```python
+   task = client.rule_compile(
+       instruction="Compile the supplied policy into durable Rules.",
+       options={
+           "sources": [
+               "/local/path/policy.md",
+               "https://example.org/policy.md",
+               "viking://resources/team-policy",
+           ]
+       },
+   )
+   task_id = task["task_id"]
+   ```
+
+   Poll with `client.get_task(task_id)` and read saved content with
+   `client.read_raw(uri)`.
+
+   **HTTP mode**
+
+   HTTP has no `options` wrapper. Put `instruction` and `sources` directly in the JSON
+   body. Use `resource_uri` for an existing Resource, `path` for a remote text source,
+   or `temp_file_id` returned by `POST /api/v1/resources/temp_upload` for local content.
+
+   ```json
+   {
+     "instruction": "Compile the supplied policy into durable Rules.",
+     "sources": [
+       {"resource_uri": "viking://resources/team-policy"},
+       {"path": "https://example.org/policy.md"},
+       {"temp_file_id": "tmp_xxx", "source_name": "policy.md"}
+     ]
+   }
+   ```
+
+   Submit this body to `POST /api/v1/rules/compile`. Never send a client-local path to
+   that endpoint. Poll `GET /api/v1/tasks/{task_id}` and read saved content through
+   `GET /api/v1/content/read?uri=...&raw=true`.
+
+   Save the returned `task_id`; acceptance does not mean compilation has completed.
+5. Poll using the selected mode until the task is completed, failed, or cancelled.
+   Query the existing task rather than resubmitting the request.
 6. Inspect `result.operations`, `written_uris`, and `write_result`. Distinguish saved
    Rules from NOOP, UNCERTAIN, and REJECT results; completed does not guarantee new Rules.
-7. Read representative saved Rules and their Scenarios using `client.read_raw(uri)` or
-   `GET /api/v1/content/read?uri=...&raw=true`. Check the policy text and evidence,
-   and verify `rules/<scenario_id>/abstract.md` holds Scenario metadata while Rule
-   files sit directly beside it as `<atomic_id>.md`.
+7. Read representative saved Rules and their Scenarios using the selected mode. Check the
+   policy text and evidence, and verify `rules/<scenario_id>/abstract.md` holds Scenario
+   metadata while Rule files sit directly beside it as `<atomic_id>.md`.
    Report the task ID, actual changes, representative URIs, and unresolved decisions.
 
 ## Boundaries

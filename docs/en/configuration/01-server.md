@@ -186,7 +186,7 @@ state and clears that timestamp. Compilation considers active and paused Rules.
 
 Rules live directly in `memories/rules/<scenario_id>/`: `abstract.md` stores Scenario
 metadata and `<atomic_id>.md` stores each Rule. See
-[Rule Scenarios](../../../examples/rules/README.md) for the storage format.
+[Rule Scenarios](../concepts/17-rule-scenarios.md) for the storage format.
 
 `jev_rule_matcher` must use provider `jev` in `noul` mode. When Jev is unconfigured,
 unavailable, fails, or returns invalid results, Scenario and Rule judgments pass

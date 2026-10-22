@@ -186,7 +186,7 @@ Rule 状态为 `active`、`paused`、`archived`。`PAUSE` 暂停检索但不设�
 
 Rule 按 Scenario 直接存放在 `memories/rules/<scenario_id>/`：`abstract.md`
 保存场景元信息，`<atomic_id>.md` 保存规则。存储格式见
-[Rule Scenarios](../../../examples/rules/README.md)。
+[Rule Scenario](../concepts/17-rule-scenarios.md)。
 
 `jev_rule_matcher` 必须使用 `jev` provider 和 `noul` 模式。未配置、不可用、调用失败
 或返回无效结果时，Scenario 和 Rule 判断直接放行，不调用 VLM。Scenario 诊断记录
