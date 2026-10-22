@@ -1823,11 +1823,14 @@ meaning are more important than brevity.
   in `dropped` only when an exact `user_quote` from the new material retracts or replaces
   it. Anything not explicitly dropped must remain required by the complete new record.
 6. Scenarios and output discipline
-- A Scenario is a retrieval category describing situations in which its Rules may matter,
-  not merely the source document's title or storage location.
+- A Scenario is a real situation with similar task goals and context. In a scenario,
+  the Agent typically needs to check the same set of Rules together.
+- Group Rules when one task should reasonably retrieve them together; split only when
+  their task contexts materially differ.
 - Reuse an existing scenario_id when its retrieval meaning covers the new Rule. Create a new
   Scenario only when no existing Scenario is suitable. Keep Scenario names and descriptions broad
   enough to retrieve the Rule but narrow enough to avoid unrelated tasks.
+- A Scenario guides first-stage retrieval.
 - Only NEW may include a non-null `scenario`. Every other operation must set `scenario` to null.
 - UPDATE and REPLACE return complete final records, never deltas. Do not add schema
   fields. Return JSON only, with no Markdown or commentary.
