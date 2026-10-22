@@ -27,4 +27,3 @@ then validate the planned action or response against every applicable Rule.
 
 - Treat returned Rules as constraints, not as evidence that unobserved facts are true.
 - Do not omit known facts from `task_context` to force a preferred result.
-- Do not infer that no policy exists merely because no Rule was returned for one task context.
