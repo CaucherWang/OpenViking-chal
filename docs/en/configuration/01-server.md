@@ -158,6 +158,8 @@ Optional models and lifecycle settings for compiled Rules:
   "rules": {
     "jev_rule_matcher": {
       "provider": "jev",
+      "api_key": "${JEV_API_KEY}",
+      "api_base": "https://api.typesafe.ai",
       "model": "jev-latest",
       "mode": "noul"
     },
@@ -179,6 +181,29 @@ Optional models and lifecycle settings for compiled Rules:
 | `archived_retention_days` | integer, `>= 1` | `30` | Days before archived Rules are permanently removed |
 | `archived_cleanup_interval_seconds` | integer, `>= 60` | `2592000` | Archived-Rule cleanup interval |
 | `archived_cleanup_enabled` | boolean | `true` | Enable periodic archived-Rule cleanup |
+
+#### `rules.jev_rule_matcher`
+
+This block configures the independent Jev System One judgments used for Scenario
+filtering and Rule applicability. It does not configure retrieval reranking.
+
+| Field | Type / values | Default | Purpose |
+|---|---|---|---|
+| `provider` | `"jev"` | required | Select the Jev provider; no other provider is accepted here |
+| `api_key` | string | required | TypeSafe or compatible gateway API key |
+| `api_base` | URL | `https://api.typesafe.ai` | Jev-compatible endpoint root; `/v1/systemone` is appended when absent |
+| `model` | string | endpoint-specific | Model sent to Jev; defaults to `jev-latest` for TypeSafe and `typesafe-ai/jev` for Vercel AI Gateway |
+| `mode` | `"noul"` | `"noul"` | Independent probability mode; `choice` is not accepted for Rule matching |
+| `timeout` | number | `30` | HTTP request timeout in seconds |
+| `extra_headers` | object / `null` | `null` | Additional HTTP request headers |
+| `log_payloads` | boolean | `false` | Log complete requests and responses; these may contain task and Rule content |
+
+For Vercel AI Gateway, set `api_base` to
+`https://ai-gateway.vercel.sh/typesafe` and `model` to `typesafe-ai/jev`.
+The shared configuration schema also exposes `threshold` and `max_input_tokens`, but
+the Rule Jev matcher does not use them. Configure Scenario filtering with
+`rules.scenario_irrelevance_threshold`; Rule applicability uses the threshold supplied
+as `rule_probability_threshold` in the Rule search request (default `0.65`).
 
 Rule status is `active`, `paused`, or `archived`. `PAUSE` suspends retrieval without
 expiry; `ARCHIVE` starts retention from `archived_at`. `RESTORE` reactivates either

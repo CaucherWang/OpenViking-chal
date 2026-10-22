@@ -158,6 +158,8 @@ Compiled Rule 的可选模型与生命周期配置：
   "rules": {
     "jev_rule_matcher": {
       "provider": "jev",
+      "api_key": "${JEV_API_KEY}",
+      "api_base": "https://api.typesafe.ai",
       "model": "jev-latest",
       "mode": "noul"
     },
@@ -179,6 +181,27 @@ Compiled Rule 的可选模型与生命周期配置：
 | `archived_retention_days` | integer，`>= 1` | `30` | archived Rule 的物理删除保留天数 |
 | `archived_cleanup_interval_seconds` | integer，`>= 60` | `2592000` | archived Rule 清理周期 |
 | `archived_cleanup_enabled` | boolean | `true` | 是否定期清理 archived Rule |
+
+#### `rules.jev_rule_matcher`
+
+该配置用于 Scenario 过滤和 Rule 适用性的独立 Jev System One 判断，不用于检索结果重排。
+
+| 字段 | 类型 / 可选值 | 默认值 | 作用 |
+|---|---|---|---|
+| `provider` | `"jev"` | 必填 | 选择 Jev provider；此处不接受其他 provider |
+| `api_key` | string | 必填 | TypeSafe 或兼容网关的 API Key |
+| `api_base` | URL | `https://api.typesafe.ai` | Jev 兼容端点根地址；未包含时自动追加 `/v1/systemone` |
+| `model` | string | 取决于端点 | 发送给 Jev 的模型；TypeSafe 默认为 `jev-latest`，Vercel AI Gateway 默认为 `typesafe-ai/jev` |
+| `mode` | `"noul"` | `"noul"` | 独立概率判断模式；Rule 判断不接受 `choice` |
+| `timeout` | number | `30` | HTTP 请求超时秒数 |
+| `extra_headers` | object / `null` | `null` | 附加 HTTP 请求头 |
+| `log_payloads` | boolean | `false` | 是否记录完整请求和响应；日志可能包含任务与 Rule 内容 |
+
+使用 Vercel AI Gateway 时，将 `api_base` 设置为
+`https://ai-gateway.vercel.sh/typesafe`，将 `model` 设置为 `typesafe-ai/jev`。
+共享配置结构中还存在 `threshold` 和 `max_input_tokens`，但 Rule Jev matcher 不使用
+这两个字段。Scenario 过滤阈值由 `rules.scenario_irrelevance_threshold` 配置；
+Rule 适用性使用 Rule 搜索请求中的 `rule_probability_threshold`（默认 `0.65`）。
 
 Rule 状态为 `active`、`paused`、`archived`。`PAUSE` 暂停检索但不设置清理期限；
 `ARCHIVE` 从 `archived_at` 开始计算保留期；`RESTORE` 可恢复两种状态为 active，
