@@ -4,9 +4,9 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from openviking.server.identity import RequestContext, Role
-from openviking.service.rule_resource_ingest import (
+from openviking.server.resource_ingest import (
     AddResourceRequest,
-    ingest_add_resource_request,
+    ingest_resource_request,
 )
 from openviking_cli.session.user_id import UserIdentifier
 
@@ -28,7 +28,7 @@ async def test_temp_upload_uses_active_server_config(monkeypatch):
         add_resource=AsyncMock(return_value={"root_uri": "viking://user/alice/resources/rules"})
     )
     monkeypatch.setattr(
-        "openviking.service.rule_resource_ingest.TempUploadStore.build",
+        "openviking.server.resource_ingest.TempUploadStore.build",
         build_store,
     )
     monkeypatch.setattr(
@@ -36,12 +36,13 @@ async def test_temp_upload_uses_active_server_config(monkeypatch):
         lambda: server_config,
     )
 
-    await ingest_add_resource_request(
+    await ingest_resource_request(
         AddResourceRequest(temp_file_id="upload_rules", source_name="rules.md"),
         RequestContext(user=UserIdentifier("acme", "alice"), role=Role.USER),
         resources=resources,
         config=SimpleNamespace(),
-        force_wait=True,
+        wait=True,
+        internal_task=True,
     )
 
     build_store.assert_called_once_with(server_config)
@@ -74,13 +75,13 @@ async def test_shared_ingest_forwards_complete_request_with_rule_overrides():
         role=Role.USER,
     )
 
-    result = await ingest_add_resource_request(
+    result = await ingest_resource_request(
         request,
         ctx,
         resources=resources,
         config=None,
-        force_wait=True,
-        force_internal_task=True,
+        wait=True,
+        internal_task=True,
     )
 
     assert result["root_uri"].endswith("/team-rules")
