@@ -8,8 +8,8 @@ import pytest
 import yaml
 
 from openviking.server.identity import RequestContext, Role
+from openviking.server.resource_ingest import AddResourceRequest
 from openviking.service.rule_jev import RuleJevScore
-from openviking.service.rule_resource_ingest import AddResourceRequest
 from openviking.service.rule_service import (
     RULE_SCHEMA,
     SCENARIO_SCHEMA,
@@ -845,6 +845,7 @@ async def test_update_reactivates_paused_rule():
 
     by_uri = {operation["uri"]: operation["content"] for operation in fs.batch["operations"]}
     metadata = yaml.safe_load(by_uri[paused.uri].split("---", 2)[1])
+    assert scenario.uri not in by_uri
     assert metadata["status"] == "active"
     assert metadata["revision"] == paused.revision + 1
     assert metadata["schema"] == RULE_SCHEMA
@@ -878,6 +879,8 @@ async def test_pause_and_archive_have_distinct_storage_and_restore_semantics(ope
         ctx=_ctx(),
     )
     writes = {item["uri"]: item["content"] for item in fs.batch["operations"]}
+    assert set(writes) == {active.uri}
+    assert scenario.uri not in writes
     fs.documents.update(writes)
     stored = await service._load_rule(active.uri, _ctx())
     assert stored.status == ("paused" if operation == "PAUSE" else "archived")
@@ -896,7 +899,10 @@ async def test_pause_and_archive_have_distinct_storage_and_restore_semantics(ope
         source_uris=[],
         ctx=_ctx(),
     )
-    fs.documents.update({item["uri"]: item["content"] for item in fs.batch["operations"]})
+    restore_writes = {item["uri"]: item["content"] for item in fs.batch["operations"]}
+    assert set(restore_writes) == {active.uri}
+    assert scenario.uri not in restore_writes
+    fs.documents.update(restore_writes)
     restored = await service._load_rule(active.uri, _ctx())
     assert restored.status == "active"
     assert restored.archived_at is None
@@ -1385,7 +1391,7 @@ async def test_run_compile_registers_owned_running_work(monkeypatch):
 @pytest.mark.asyncio
 async def test_compile_uses_search_pipeline_to_select_existing_rules(monkeypatch):
     class _Tracker:
-        update_stage = AsyncMock()
+        patch_task = AsyncMock()
 
     fs = _FS()
     compiler = SimpleNamespace()
@@ -1488,7 +1494,7 @@ def test_compile_request_reuses_complete_add_resource_model():
 async def test_collect_sources_uses_shared_add_resource_ingestion(monkeypatch):
     ingest = AsyncMock(return_value={"root_uri": "viking://user/alice/resources/team-rules"})
     monkeypatch.setattr(
-        "openviking.service.rule_service.ingest_add_resource_request",
+        "openviking.service.rule_service.ingest_resource_request",
         ingest,
     )
     service = RuleService()
@@ -1518,8 +1524,8 @@ async def test_collect_sources_uses_shared_add_resource_ingestion(monkeypatch):
     assert isinstance(add_request, AddResourceRequest)
     assert add_request.args == {"header": "value"}
     assert add_request.instruction == ""
-    assert ingest.await_args.kwargs["force_wait"] is True
-    assert ingest.await_args.kwargs["force_internal_task"] is True
+    assert ingest.await_args.kwargs["wait"] is True
+    assert ingest.await_args.kwargs["internal_task"] is True
 
 
 @pytest.mark.asyncio
@@ -1542,7 +1548,7 @@ async def test_collect_sources_waits_for_declared_connector(monkeypatch):
         )
     )
     monkeypatch.setattr(
-        "openviking.service.rule_service.ingest_add_resource_request",
+        "openviking.service.rule_service.ingest_resource_request",
         ingest,
     )
     monkeypatch.setattr("openviking.service.rule_service.get_task_tracker", lambda: tracker)
@@ -1573,8 +1579,8 @@ async def test_collect_sources_waits_for_declared_connector(monkeypatch):
     assert text == "parsed rules"
     assert uris == ["viking://user/alice/resources/team-rules"]
     assert ingest.await_args.args[0].instruction == ""
-    assert ingest.await_args.kwargs["force_wait"] is False
-    assert ingest.await_args.kwargs["force_internal_task"] is True
+    assert ingest.await_args.kwargs["wait"] is False
+    assert ingest.await_args.kwargs["internal_task"] is True
     tracker.wait.assert_awaited_once_with(
         "connector-task",
         account_id="acme",
@@ -1586,7 +1592,7 @@ async def test_collect_sources_waits_for_declared_connector(monkeypatch):
 @pytest.mark.asyncio
 async def test_collect_sources_surfaces_declared_connector_failure(monkeypatch):
     monkeypatch.setattr(
-        "openviking.service.rule_service.ingest_add_resource_request",
+        "openviking.service.rule_service.ingest_resource_request",
         AsyncMock(
             return_value={
                 "status": "accepted",
@@ -1643,7 +1649,7 @@ async def test_collect_sources_rejects_obvious_multimodal_inputs_before_ingestio
 ):
     ingest = AsyncMock()
     monkeypatch.setattr(
-        "openviking.service.rule_service.ingest_add_resource_request",
+        "openviking.service.rule_service.ingest_resource_request",
         ingest,
     )
     service = RuleService()
@@ -1673,7 +1679,7 @@ async def test_collect_sources_rejects_obvious_multimodal_inputs_before_ingestio
 async def test_collect_sources_allows_archive_and_git_inputs(monkeypatch, path):
     ingest = AsyncMock(return_value={"root_uri": "viking://user/alice/resources/rules"})
     monkeypatch.setattr(
-        "openviking.service.rule_service.ingest_add_resource_request",
+        "openviking.service.rule_service.ingest_resource_request",
         ingest,
     )
     service = RuleService()
@@ -1693,7 +1699,7 @@ async def test_collect_sources_allows_archive_and_git_inputs(monkeypatch, path):
     )
 
     assert text == "parsed rules"
-    assert ingest.await_args.kwargs["force_wait"] is True
+    assert ingest.await_args.kwargs["wait"] is True
 
 
 @pytest.mark.asyncio
@@ -2030,13 +2036,13 @@ def test_compile_repair_prompt_rejects_overflow_without_truncation():
 
 
 def test_compile_material_batches_preserve_all_text_within_budget():
-    instruction = ("First rule paragraph.\n\n" * 80) + ("必须先确认。\n" * 80)
+    instruction = "Only compile release rules; exclude all finance rules."
     source = ("## Source\nSecond rule paragraph.\n" * 100) + "final rule"
 
     batches = _build_material_batches(instruction, source, max_tokens=300)
 
     assert len(batches) > 2
-    assert "".join(batch_instruction for batch_instruction, _ in batches) == instruction
+    assert all(batch_instruction == instruction for batch_instruction, _ in batches)
     assert "".join(batch_source for _, batch_source in batches) == source
     assert all(
         estimate_text_tokens(batch_instruction) + estimate_text_tokens(batch_source) <= 300
@@ -2044,10 +2050,81 @@ def test_compile_material_batches_preserve_all_text_within_budget():
     )
 
 
+def test_compile_material_batches_split_instruction_only_input():
+    instruction = ("First rule paragraph.\n\n" * 80) + ("必须先确认。\n" * 80)
+
+    batches = _build_material_batches(instruction, "", max_tokens=300)
+
+    assert len(batches) > 1
+    assert "".join(batch_instruction for batch_instruction, _ in batches) == instruction
+    assert all(not batch_source for _, batch_source in batches)
+    assert all(estimate_text_tokens(batch_instruction) <= 300 for batch_instruction, _ in batches)
+
+
+def test_compile_material_batches_reject_source_when_instruction_fills_budget():
+    with pytest.raises(InvalidArgumentError, match="leaves no room for source material"):
+        _build_material_batches("scope constraint " * 20, "source", max_tokens=10)
+
+
+@pytest.mark.asyncio
+async def test_compile_repeats_source_scope_instruction_in_every_model_batch(monkeypatch):
+    class _Tracker:
+        patch_task = AsyncMock()
+
+    instruction = "Only compile the release section; do not import the finance section."
+    release = "Release policy clause. " * 800
+    finance = "Finance policy clause. " * 800
+    source = (release + finance)[:29_460]
+    prompts: list[str] = []
+
+    async def record_prompt(*, prompt, thinking):
+        assert thinking is True
+        prompts.append(prompt)
+        return json.dumps({"mutations": [], "reason": "prompt recorded"})
+
+    fs = _FS()
+    compiler = SimpleNamespace(
+        model="unknown-custom",
+        max_tokens=None,
+        get_completion_async=AsyncMock(side_effect=record_prompt),
+    )
+    service = RuleService()
+    service.set_dependencies(
+        fs=fs,
+        resources=SimpleNamespace(),
+        search=SimpleNamespace(),
+        vlm_resolver=SimpleNamespace(get_vlm=AsyncMock(return_value=compiler)),
+        rules_config=None,
+    )
+    monkeypatch.setattr(
+        "openviking.service.rule_service.get_task_tracker",
+        lambda: _Tracker(),
+    )
+    monkeypatch.setattr(service, "_ensure_rule_directories", AsyncMock())
+    monkeypatch.setattr(service, "_collect_sources", AsyncMock(return_value=(source, [])))
+    monkeypatch.setattr(
+        service,
+        "_find_relevant_rules",
+        AsyncMock(return_value=SimpleNamespace(scenarios=[], selected=[])),
+    )
+
+    result = await service._compile(
+        RuleCompileRequest(instruction=instruction),
+        ctx=_ctx(),
+        task_id="rul_scope_batches",
+    )
+
+    assert len(source) == 29_460
+    assert result["batch_count"] == len(prompts) == 2
+    assert "Finance policy clause." in prompts[1]
+    assert all(instruction in prompt for prompt in prompts)
+    assert fs.batch is None
+
+
 @pytest.mark.asyncio
 async def test_compile_batches_sequentially_and_writes_once(monkeypatch):
     class _Tracker:
-        update_stage = AsyncMock()
+        patch_task = AsyncMock()
 
     fs = _FS()
     compiler = SimpleNamespace(get_completion_async=AsyncMock())
@@ -2146,7 +2223,7 @@ async def test_compile_batches_sequentially_and_writes_once(monkeypatch):
 @pytest.mark.asyncio
 async def test_compile_does_not_carry_archived_rules_into_later_batches(monkeypatch):
     class _Tracker:
-        update_stage = AsyncMock()
+        patch_task = AsyncMock()
 
     fs = _FS()
     compiler = SimpleNamespace()
@@ -2230,7 +2307,7 @@ async def test_compile_does_not_carry_archived_rules_into_later_batches(monkeypa
 @pytest.mark.asyncio
 async def test_compile_does_not_write_when_a_later_batch_fails(monkeypatch):
     class _Tracker:
-        update_stage = AsyncMock()
+        patch_task = AsyncMock()
 
     fs = _FS()
     compiler = SimpleNamespace()
@@ -2346,7 +2423,8 @@ async def test_new_rule_reuses_unrecalled_scenario_without_losing_members():
     fs = _FS()
     scenario_uri = "viking://user/alice/memories/rules/file-operations/abstract.md"
     metadata = _scenario_metadata()
-    fs.documents[scenario_uri] = _render_markdown(metadata, "# File operations")
+    scenario_content = _render_markdown(metadata, "# File operations")
+    fs.documents[scenario_uri] = scenario_content
     old = _stored_rule("unselected")
     fs.documents[old.uri] = _stored_markdown(old)
     service = RuleService()
@@ -2369,8 +2447,8 @@ async def test_new_rule_reuses_unrecalled_scenario_without_losing_members():
         plan, existing_scenarios=[], existing_rules=[], source_uris=[], ctx=_ctx()
     )
     writes = {item["uri"]: item["content"] for item in fs.batch["operations"]}
-    scenario_data = yaml.safe_load(writes[scenario_uri].split("---", 2)[1])
-    assert scenario_data["description"] == metadata["description"]
+    assert scenario_uri not in writes
+    assert fs.documents[scenario_uri] == scenario_content
     assert old.uri not in writes
     fs.documents.update(writes)
     scenario = await service._load_scenario(scenario_uri, _ctx())
