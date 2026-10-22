@@ -172,7 +172,7 @@ Compiled Rule 的可选模型与生命周期配置：
 
 | 字段 | 类型 / 可选值 | 默认值 | 作用 |
 |---|---|---|---|
-| `jev_rule_matcher` | rerank 配置 / `null` | `null` | Scenario 过滤和 Rule 适用性判断使用的 Jev Noul 模型 |
+| `jev_rule_matcher` | Jev Noul 配置 / `null` | `null` | Scenario 过滤和 Rule 适用性判断使用的 Jev Noul 模型 |
 | `compiler` | VLM 配置 / `null` | `null` | 专用 Rule Compiler |
 | `compiler_context_window` | `0` 或 integer `>= 2048` | `0` | Compiler 上下文窗口；`0` 表示自动探测并使用保守回退值 |
 | `scenario_irrelevance_threshold` | number，`0.5`-`1.0` | `0.9` | Scenario 无关概率达到该值时跳过 |

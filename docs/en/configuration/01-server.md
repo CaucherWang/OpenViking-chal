@@ -172,7 +172,7 @@ Optional models and lifecycle settings for compiled Rules:
 
 | Field | Type / values | Default | Purpose |
 |---|---|---|---|
-| `jev_rule_matcher` | rerank config / `null` | `null` | Jev Noul matcher for Scenario filtering and Rule applicability |
+| `jev_rule_matcher` | Jev Noul config / `null` | `null` | Jev Noul matcher for Scenario filtering and Rule applicability |
 | `compiler` | VLM config / `null` | `null` | Dedicated Rule compiler |
 | `compiler_context_window` | `0` or integer `>= 2048` | `0` | Compiler context window; `0` auto-detects with a conservative fallback |
 | `scenario_irrelevance_threshold` | number, `0.5`-`1.0` | `0.9` | Skip a Scenario only at or above this irrelevance probability |
