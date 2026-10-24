@@ -2053,7 +2053,10 @@ existing_rules:
                 updated = store_rule(
                     atomic_id=primary.atomic_id,
                     revision=primary.revision + 1,
-                    status="active",
+                    # UPDATE must not change the lifecycle state: a paused Rule stays
+                    # paused until an explicit RESTORE, otherwise any compile that
+                    # merely touches its content silently re-enables retrieval.
+                    status=primary.status,
                     scenario_id=primary.scenario_id,
                     record=mutation.record,
                     evidence=mutation.evidence_spans,
