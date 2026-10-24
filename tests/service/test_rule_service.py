@@ -806,7 +806,13 @@ async def test_replace_deletes_old_rule_and_creates_new_rule():
 
 
 @pytest.mark.asyncio
-async def test_update_reactivates_paused_rule():
+async def test_update_preserves_paused_rule_status():
+    """UPDATE refreshes content but must not re-enable a paused Rule.
+
+    Documented semantics reserve reactivation for RESTORE; a compile that only
+    touches a paused Rule's content must leave it paused, otherwise pausing a
+    Rule is silently undone by the next compile that recalls it.
+    """
     fs = _FS()
     service = RuleService()
     service.set_dependencies(
@@ -846,10 +852,55 @@ async def test_update_reactivates_paused_rule():
     by_uri = {operation["uri"]: operation["content"] for operation in fs.batch["operations"]}
     metadata = yaml.safe_load(by_uri[paused.uri].split("---", 2)[1])
     assert scenario.uri not in by_uri
-    assert metadata["status"] == "active"
+    assert metadata["status"] == "paused"
     assert metadata["revision"] == paused.revision + 1
     assert metadata["schema"] == RULE_SCHEMA
     assert "archived_at" not in metadata
+
+
+@pytest.mark.asyncio
+async def test_update_keeps_active_rule_active():
+    """UPDATE of an active Rule still produces an active Rule."""
+    fs = _FS()
+    service = RuleService()
+    service.set_dependencies(
+        fs=fs,
+        resources=SimpleNamespace(),
+        search=SimpleNamespace(),
+        vlm_resolver=SimpleNamespace(),
+        rules_config=None,
+    )
+    active = _stored_rule("active-rule", status="active")
+    scenario = StoredScenario(
+        schema=SCENARIO_SCHEMA,
+        scenario_id=active.scenario_id,
+        name="File operations",
+        description="Rules for file operations.",
+        uri="viking://user/alice/memories/rules/file-operations/abstract.md",
+        content="scenario",
+    )
+
+    await service._apply_plan(
+        RuleCompilePlan(
+            mutations=[
+                RuleMutation(
+                    operation="UPDATE",
+                    target_ids=[active.atomic_id],
+                    record=_record("active-rule"),
+                    evidence_spans=["refresh active rule"],
+                )
+            ]
+        ),
+        existing_scenarios=[scenario],
+        existing_rules=[active],
+        source_uris=[],
+        ctx=_ctx(),
+    )
+
+    by_uri = {operation["uri"]: operation["content"] for operation in fs.batch["operations"]}
+    metadata = yaml.safe_load(by_uri[active.uri].split("---", 2)[1])
+    assert metadata["status"] == "active"
+    assert metadata["revision"] == active.revision + 1
 
 
 @pytest.mark.asyncio
