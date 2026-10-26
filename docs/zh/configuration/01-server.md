@@ -151,7 +151,7 @@ API 型 `embedding`、`vlm`、`query_planner` 和 `rerank` 配置会复用部分
 
 ### `rules`
 
-Compiled Rule 的可选模型与生命周期配置：
+已编译规则的可选模型与生命周期配置：
 
 ```json
 {
@@ -171,64 +171,64 @@ Compiled Rule 的可选模型与生命周期配置：
 
 | 字段 | 类型 / 可选值 | 默认值 | 作用 |
 |---|---|---|---|
-| `jev_rule_matcher` | Jev Noul 配置 / `null` | `null` | Scenario 过滤和 Rule 适用性判断使用的 Jev Noul 模型 |
-| `compiler` | VLM 配置 / `null` | `null` | 专用 Rule Compiler |
-| `compiler_context_window` | `0` 或 integer `>= 2048` | `0` | Compiler 上下文窗口；`0` 表示自动探测并使用保守回退值 |
-| `scenario_irrelevance_threshold` | number，`0.5`-`1.0` | `0.9` | Scenario 无关概率达到该值时跳过 |
-| `archived_retention_days` | integer，`>= 1` | `30` | archived Rule 的物理删除保留天数 |
-| `archived_cleanup_interval_seconds` | integer，`>= 60` | `2592000` | archived Rule 清理周期 |
-| `archived_cleanup_enabled` | boolean | `true` | 是否定期清理 archived Rule |
+| `jev_rule_matcher` | 判断模型配置 / `null` | `null` | 场景过滤和规则适用性判断使用的模型 |
+| `compiler` | 视觉语言模型配置 / `null` | `null` | 专用规则编译器 |
+| `compiler_context_window` | `0` 或整数 `>= 2048` | `0` | 编译器上下文窗口；`0` 表示自动探测并使用保守回退值 |
+| `scenario_irrelevance_threshold` | 数值，`0.5`-`1.0` | `0.9` | 场景无关概率达到该值时跳过 |
+| `archived_retention_days` | 整数，`>= 1` | `30` | 已归档规则的物理删除保留天数 |
+| `archived_cleanup_interval_seconds` | 整数，`>= 60` | `2592000` | 已归档规则清理周期 |
+| `archived_cleanup_enabled` | 布尔值 | `true` | 是否定期清理已归档规则 |
 
-Rule 编译始终以 `thinking=true` 调用专用 Compiler 或回退的账户默认 VLM，
+规则编译始终以 `thinking=true` 调用专用编译器或回退的账户默认视觉语言模型，
 并覆盖其配置默认值。请使用支持思考模式的模型，否则编译可能失败。
 
 #### `rules.jev_rule_matcher`
 
-该配置用于 Scenario 过滤和 Rule 适用性的独立 Jev System One 判断，不用于检索结果重排。
+该配置用于场景过滤和规则适用性的独立概率判断，不用于检索结果重排。
 
 | 字段 | 类型 / 可选值 | 默认值 | 作用 |
 |---|---|---|---|
-| `provider` | `typesafe`、`vercel`、`openrouter`、`custom` | `typesafe` | 选择 endpoint 和 model 默认值 |
-| `api_key` | string | 必填 | 所选 provider 的 API Key |
-| `api_base` | URL / `null` | provider 默认值 | 完整的 System One 请求 URL；显式配置的值会原样使用 |
-| `model` | string / `null` | provider 默认值 | 模型名或 Endpoint ID；`custom` 必填 |
-| `timeout` | number | `30` | HTTP 请求超时秒数 |
-| `extra_headers` | object / `null` | `null` | 附加 HTTP 请求头 |
-| `log_payloads` | boolean | `false` | 是否记录完整请求和响应；日志可能包含任务与 Rule 内容 |
+| `provider` | `typesafe`、`vercel`、`openrouter`、`custom` | `typesafe` | 选择请求地址和模型默认值 |
+| `api_key` | 字符串 | 必填 | 所选服务提供方的接口密钥 |
+| `api_base` | 网络地址 / `null` | 服务提供方默认值 | 完整的模型请求地址；显式配置的值会原样使用 |
+| `model` | 字符串 / `null` | 服务提供方默认值 | 模型名或端点标识；`custom` 必填 |
+| `timeout` | 数值 | `30` | 网络请求超时秒数 |
+| `extra_headers` | 对象 / `null` | `null` | 附加请求头 |
+| `log_payloads` | 布尔值 | `false` | 是否记录完整请求和响应；日志可能包含任务与规则内容 |
 
-| Provider | 默认请求 URL | 默认 model | 说明 |
+| 服务提供方 | 默认请求地址 | 默认模型 | 说明 |
 |---|---|---|---|
 | `typesafe` | `https://api.typesafe.ai/v1/systemone` | `jev-latest` | TypeSafe 直连 |
-| `vercel` | `https://ai-gateway.vercel.sh/typesafe/v1/systemone` | `typesafe-ai/jev` | Vercel AI Gateway 的 TypeSafe 兼容 API |
-| `openrouter` | `https://openrouter.ai/api/v1/systemone` | `jev-latest` | OpenRouter System One API |
+| `vercel` | `https://ai-gateway.vercel.sh/typesafe/v1/systemone` | `typesafe-ai/jev` | Vercel 网关的 TypeSafe 兼容接口 |
+| `openrouter` | `https://openrouter.ai/api/v1/systemone` | `jev-latest` | OpenRouter 模型接口 |
 | `custom` | 无 | 无 | 必须同时配置 `api_base` 和 `model` |
 
-`api_base` 和 `model` 可分别覆盖 provider 默认值。显式配置的 `api_base` 是完整
-POST URL，任何 provider（包括 `custom`）都不会修改它或追加后缀。
-`extra_headers` 会扩展 provider 请求头，也可以覆盖默认请求头。Rule 匹配固定使用
-独立 Noul 判断，因此不再包含 `mode`、`threshold` 或 `max_input_tokens` 配置。
-Scenario 过滤阈值由 `rules.scenario_irrelevance_threshold` 配置；
-Rule 适用性使用 Rule 搜索请求中的 `rule_probability_threshold`（默认 `0.65`）。
+`api_base` 和 `model` 可分别覆盖服务提供方的默认值。显式配置的 `api_base` 是完整
+请求地址，任何服务提供方（包括 `custom`）都不会修改它或追加后缀。
+`extra_headers` 会扩展服务提供方请求头，也可以覆盖默认请求头。规则匹配固定使用
+独立概率判断，因此不再包含 `mode`、`threshold` 或 `max_input_tokens` 配置。
+场景过滤阈值由 `rules.scenario_irrelevance_threshold` 配置；
+规则适用性使用规则搜索请求中的 `rule_probability_threshold`（默认 `0.65`）。
 
-Rule 状态为 `active`、`paused`、`archived`。`PAUSE` 暂停检索但不设置清理期限；
-`ARCHIVE` 从 `archived_at` 开始计算保留期；`RESTORE` 将 paused Rule 恢复为
-active。编译候选只包含 active 和 paused Rule；archived Rule 视为逻辑删除，不是
-编译候选，也无法通过 Rule 编译恢复。`ARCHIVE` 必须由用户指令明确表达删除、丢弃
+规则状态为 `active`、`paused`、`archived`。`PAUSE` 暂停检索但不设置清理期限；
+`ARCHIVE` 从 `archived_at` 开始计算保留期；`RESTORE` 将 `paused` 规则恢复为
+`active`。编译候选只包含 `active` 和 `paused` 规则；`archived` 规则视为逻辑删除，不是
+编译候选，也无法通过规则编译恢复。`ARCHIVE` 必须由用户指令明确表达删除、丢弃
 或移入回收站；不包含删除语义的停用请求使用 `PAUSE`。
 
-Rule 按 Scenario 直接存放在 `memories/rules/<scenario_id>/`：`abstract.md`
+规则按场景直接存放在 `memories/rules/<scenario_id>/`：`abstract.md`
 保存场景元信息，`<atomic_id>.md` 保存规则。存储格式见
 [规则（Beta）](../concepts/17-rule-scenarios.md)。
 
-`jev_rule_matcher` 未配置、不可用、调用失败或返回无效结果时，Scenario 和 Rule 判断
-直接放行，不调用 VLM。Scenario 诊断记录 `decision=pass`；Rule 返回 `judge=pass`
-和 warning，以 `1.0` 作为通过阈值的放行分数，
-该值不是模型评估的适用概率。Agent 仍需根据具体事实核验适用条件和例外。
-规则编译从 `compiler` 回退到账户默认 VLM。原 `rule_matcher` 配置已移除，不再读取。
+`jev_rule_matcher` 未配置、不可用、调用失败或返回无效结果时，场景和规则判断
+直接放行，不调用视觉语言模型。场景诊断记录 `decision=pass`；规则返回 `judge=pass`
+和警告，以 `1.0` 作为通过阈值的放行分数，
+该值不是模型评估的适用概率。智能体仍需根据具体事实核验适用条件和例外。
+规则编译从 `compiler` 回退到账户默认视觉语言模型。原 `rule_matcher` 配置已移除，不再读取。
 
-Rule 的 `applies_when` 可以为空，默认空值；为空时表示任何情况都适用，除非
-`exception` 条件成立。没有适用条件和例外的候选 Rule 适用概率直接取 `1.0`。
-Compiler 会优先忠实提炼原文中的对象、操作、前提和场景，尽量生成非空且可判定的
+规则的 `applies_when` 可以为空，默认空值；为空时表示任何情况都适用，除非
+`exception` 条件成立。没有适用条件和例外的候选规则适用概率直接取 `1.0`。
+编译器会优先忠实提炼原文中的对象、操作、前提和场景，尽量生成非空且可判定的
 `applies_when`，不得编造条件或丢弃原文已有的限制。空条件不表示未知或不适用。
 
 ### `rerank`
