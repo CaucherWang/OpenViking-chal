@@ -4,6 +4,8 @@ For its role and architecture, read [VikingBot](../concepts/15-vikingbot.md), th
 
 VikingBot is the multi-channel AI Agent built into OpenViking. It can start together with OpenViking, run independently for local debugging, or operate as a long-running Gateway connected to chat platforms.
 
+When connected to OpenViking, VikingBot also supports the `openviking_rule_search` [rule search tool (Beta)](../workflows/02-rule-validation.md), which retrieves applicable rules for a task.
+
 This guide covers installation and configuration for the three main usage scenarios. For complete documentation about Agent tools, chat channels, and architecture, see the [VikingBot documentation](https://github.com/volcengine/OpenViking/blob/main/bot/README.md).
 
 ## Installation
@@ -78,14 +80,6 @@ Restart VikingBot or OpenViking Server after changing the configuration.
 | **C. Use the Gateway as a unified entry point** | Long-running service, remote access, or chat platforms | `vikingbot gateway` | Connects to an existing Server or runs standalone |
 
 The three scenarios are different runtime entry points and can share the same `ov.conf`.
-
-## Rule search tool (Beta)
-
-VikingBot versions with Rule support include `openviking_rule_search`. Enable OpenViking tools and connect to a server supporting the Rules API for on-demand Agent calls. Its `task_context` parameter describes the goal, object, planned actions, and known facts.
-
-First [compile rule material](../workflows/02-rule-validation.md) and confirm the index task completes. Then ask the Agent to check a concrete task, for example: “Perform a read-only open-source license review of this repository. Read repository evidence first, then search for rules and check each one.”
-
-The tool delivers complete constraint text. The Agent must check conditions and exceptions and follow applicable rules before acting or answering. Search does not judge violations or forcibly inject rules on every message or session start. See [Rules (Beta)](../concepts/17-rule-scenarios.md) for behavior and the [Rules API (Beta)](../api/26-rules.md) for parameters and responses.
 
 ## Scenario A: Start OpenViking and the Bot Together
 

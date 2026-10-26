@@ -4,6 +4,8 @@
 
 VikingBot 是 OpenViking 内置的多渠道 AI Agent。它既可以和 OpenViking 一起启动，也可以在本地独立调试，或作为长期运行的 Gateway 接入聊天平台。
 
+连接 OpenViking 后，VikingBot 还支持 `openviking_rule_search` [规则搜索工具（Beta）](../workflows/02-rule-validation.md)，可按任务召回适用规则。
+
 本指南介绍安装方式，以及三种主要使用场景的配置和启动方法。Agent 工具、聊天渠道、架构等完整说明请参见 [VikingBot 中文文档](https://github.com/volcengine/OpenViking/blob/main/bot/README_CN.md)。
 
 ## 安装
@@ -78,14 +80,6 @@ export OPENVIKING_CONFIG_FILE=/path/to/ov.conf
 | **C. Gateway 统一入口** | 长期运行、远程访问或接入聊天平台 | `vikingbot gateway` | 可连接已有 Server，也可 standalone 运行 |
 
 三种场景是不同的运行入口，可以共用同一份 `ov.conf`。
-
-## 规则搜索工具（Beta）
-
-包含 Rule 功能的 VikingBot 已提供 `openviking_rule_search` 工具。启用 OpenViking 工具并连接支持规则 API 的服务后，Agent 可按需调用；工具参数 `task_context` 描述任务目标、对象、计划动作和已知事实。
-
-先[编译规则材料](../workflows/02-rule-validation.md)并确认索引任务完成，再让 Agent 核查具体任务，例如：“只读检查这个仓库的开源许可证，先读取仓库证据，再调用规则搜索并逐条核验。”
-
-工具交付完整的约束文本，Agent 必须检查适用条件和例外，并在行动或回答前遵守适用规则。搜索本身不判断是否违规，也不在每条消息或会话开始时强制注入规则。能力原理见[规则（Beta）](../concepts/17-rule-scenarios.md)，参数和响应见[规则 API（Beta）](../api/26-rules.md)。
 
 ## 场景 A：OpenViking + Bot 一体启动
 
