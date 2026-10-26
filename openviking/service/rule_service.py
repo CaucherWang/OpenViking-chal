@@ -35,7 +35,7 @@ from openviking.service.rule_jev import (
 from openviking.service.search_service import SearchService
 from openviking.service.task_domain import TaskPatch
 from openviking.service.task_tracker import TaskRecord, TaskStatus, get_task_tracker
-from openviking.service.task_work_index import bind_task_context
+from openviking.service.task_work_index import bind_task_context, detach_task_context
 from openviking.session.memory.utils.memory_fields import strip_memory_fields_trailer
 from openviking.utils.time_utils import get_current_timestamp, parse_iso_datetime
 from openviking.utils.token_estimation import estimate_text_tokens
@@ -758,15 +758,21 @@ class RuleService:
         )
         fs, _, _ = self._dependencies()
         if accumulated_writes:
-            write_result = await fs.batch_write(
-                root_uri=_rules_root(ctx),
-                operations=[
-                    {"uri": uri, "content": content, "mode": "upsert"}
-                    for uri, content in accumulated_writes.items()
-                ],
-                ctx=ctx,
-                wait=False,
-            )
+            # Detach the compile Task context so the file-write background work is
+            # owned and finalized by its own content_batch_write Task. Otherwise it
+            # inherits this compile Task's id, the ContentWriteProcessor overwrites
+            # the compile result with the file-write result, and the content-write
+            # Task created by batch_write never receives its work and stays pending.
+            with detach_task_context():
+                write_result = await fs.batch_write(
+                    root_uri=_rules_root(ctx),
+                    operations=[
+                        {"uri": uri, "content": content, "mode": "upsert"}
+                        for uri, content in accumulated_writes.items()
+                    ],
+                    ctx=ctx,
+                    wait=False,
+                )
         else:
             write_result = {"created": [], "updated": [], "unchanged": []}
         return {
