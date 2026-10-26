@@ -177,6 +177,9 @@ export const sections: DocSection[] = [
       g('Choose a workflow', '选择开发任务', [
         p('workflows/01-overview')
       ]),
+      g('Rule validation (Beta)', '规则校验（Beta）', [
+        p('workflows/02-rule-validation')
+      ]),
       g('Manage context', '组织与维护上下文', [
         p('guides/23-data-organize'),
         p('guides/18-openviking-assets'),
@@ -254,6 +257,9 @@ export const sections: DocSection[] = [
         p('api/16-memory'),
         p('api/04-skills'),
         p('api/19-agent-evolution')
+      ]),
+      g('Rules (Beta)', '规则（Beta）', [
+        p('api/26-rules')
       ]),
       g('Data and extension APIs', '数据与扩展 API', [
         p('api/11-snapshot'),

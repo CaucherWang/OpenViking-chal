@@ -79,6 +79,14 @@ export OPENVIKING_CONFIG_FILE=/path/to/ov.conf
 
 三种场景是不同的运行入口，可以共用同一份 `ov.conf`。
 
+## 规则搜索工具（Beta）
+
+包含 Rule 功能的 VikingBot 已提供 `openviking_rule_search` 工具。启用 OpenViking 工具并连接支持规则 API 的服务后，Agent 可按需调用；工具参数 `task_context` 描述任务目标、对象、计划动作和已知事实。
+
+先[编译规则材料](../workflows/02-rule-validation.md)并确认索引任务完成，再让 Agent 核查具体任务，例如：“只读检查这个仓库的开源许可证，先读取仓库证据，再调用规则搜索并逐条核验。”
+
+工具交付完整的约束文本，Agent 必须检查适用条件和例外，并在行动或回答前遵守适用规则。搜索本身不判断是否违规，也不在每条消息或会话开始时强制注入规则。能力原理见[规则（Beta）](../concepts/17-rule-scenarios.md)，参数和响应见[规则 API（Beta）](../api/26-rules.md)。
+
 ## 场景 A：OpenViking + Bot 一体启动
 
 这是本地完整体验的推荐方式。OpenViking Server 和 VikingBot Gateway 会一起启动：

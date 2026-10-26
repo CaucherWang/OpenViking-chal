@@ -222,7 +222,7 @@ instruction; non-deletion deactivation requests use `PAUSE`.
 
 Rules live directly in `memories/rules/<scenario_id>/`: `abstract.md` stores Scenario
 metadata and `<atomic_id>.md` stores each Rule. See
-[Rule Scenarios](../concepts/17-rule-scenarios.md) for the storage format.
+[Rules (Beta)](../concepts/17-rule-scenarios.md) for the storage format.
 
 When `jev_rule_matcher` is unconfigured, unavailable, fails, or returns invalid
 results, Scenario and Rule judgments pass the candidates without calling a VLM.

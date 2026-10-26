@@ -218,7 +218,7 @@ active。编译候选只包含 active 和 paused Rule；archived Rule 视为逻�
 
 Rule 按 Scenario 直接存放在 `memories/rules/<scenario_id>/`：`abstract.md`
 保存场景元信息，`<atomic_id>.md` 保存规则。存储格式见
-[Rule Scenario](../concepts/17-rule-scenarios.md)。
+[规则（Beta）](../concepts/17-rule-scenarios.md)。
 
 `jev_rule_matcher` 未配置、不可用、调用失败或返回无效结果时，Scenario 和 Rule 判断
 直接放行，不调用 VLM。Scenario 诊断记录 `decision=pass`；Rule 返回 `judge=pass`
