@@ -179,6 +179,10 @@ Optional models and lifecycle settings for compiled Rules:
 | `archived_cleanup_interval_seconds` | integer, `>= 60` | `2592000` | Archived-Rule cleanup interval |
 | `archived_cleanup_enabled` | boolean | `true` | Enable periodic archived-Rule cleanup |
 
+Rule compilation always calls the dedicated compiler, or the account VLM fallback,
+with `thinking=true`, overriding its configured default. Use a model that supports
+thinking mode, or compilation may fail.
+
 #### `rules.jev_rule_matcher`
 
 This block configures the independent Jev System One judgments used for Scenario

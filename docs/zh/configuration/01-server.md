@@ -179,6 +179,9 @@ Compiled Rule 的可选模型与生命周期配置：
 | `archived_cleanup_interval_seconds` | integer，`>= 60` | `2592000` | archived Rule 清理周期 |
 | `archived_cleanup_enabled` | boolean | `true` | 是否定期清理 archived Rule |
 
+Rule 编译始终以 `thinking=true` 调用专用 Compiler 或回退的账户默认 VLM，
+并覆盖其配置默认值。请使用支持思考模式的模型，否则编译可能失败。
+
 #### `rules.jev_rule_matcher`
 
 该配置用于 Scenario 过滤和 Rule 适用性的独立 Jev System One 判断，不用于检索结果重排。
