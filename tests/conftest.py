@@ -153,15 +153,6 @@ async def service(
         "openviking.utils.agfs_utils.create_agfs_client",
         lambda *args, **kwargs: mock_agfs,
     )
-
-    async def skip_system_asset_sync(*args, **kwargs):
-        return 0
-
-    # MockLocalAGFS does not implement QueueFS enqueue/dequeue semantics.
-    monkeypatch.setattr(
-        "openviking.service.core.SystemAssetSynchronizer.sync",
-        skip_system_asset_sync,
-    )
     OpenVikingConfigSingleton.reset_instance()
     OpenVikingConfigSingleton.initialize(
         config_dict={
