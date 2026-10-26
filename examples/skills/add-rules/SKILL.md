@@ -85,8 +85,11 @@ OpenViking Rules, then verify the task result and saved Rules.
 - Prefer faithful, non-empty `applies_when` conditions supported by the source.
   Empty `applies_when` means applicable in every situation except `exception`, not unknown.
 - Request lifecycle changes only when the user explicitly authorizes them.
-  Use PAUSE to suspend and ARCHIVE to mark for retention-based cleanup.
-  Paused Rules can be updated and reactivated; archived Rules are not compiler candidates.
+  Use ARCHIVE only when the user's instruction explicitly asks to delete, discard, or
+  move a Rule to the recycle bin. Use PAUSE for pause, disable, deactivate, retire,
+  stop-applying, or stop-using requests without deletion intent. Archived Rules are
+  logically deleted: they are not compiler candidates and cannot be restored through
+  Rule compilation.
 - Use client connection configuration, not service-side model credentials. Do not switch
   instances or expose credentials to resolve a failed request.
 - The API accepts at most 16 sources and 64000 instruction characters; source collection

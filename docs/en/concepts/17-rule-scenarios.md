@@ -40,14 +40,17 @@ Scenario candidate limit. After selecting Scenarios, the service reads their dir
 Rule files. Membership comes from the directory, so no `rule_uris` list is needed.
 Paused and archived Rules remain in their Scenario until lifecycle cleanup removes
 expired archived Rules. Rule search uses active Rules; compilation considers active
-and paused Rules.
+and paused Rules. Archived Rules are logically deleted and appear in neither path.
 
 Rule status is `active`, `paused`, or `archived`. `PAUSE` suspends an active Rule
 without scheduling removal. `ARCHIVE` marks a Rule for cleanup after 30 days by
 default, using `archived_at`; repeating it does not reset that timestamp.
-`RESTORE` reactivates a paused or archived Rule and clears `archived_at`.
-Updating a paused Rule reactivates it. Replaced Rules and consolidated fragments
-become archived. Lifecycle actions require explicit user instructions.
+`RESTORE` reactivates a paused Rule. Archived Rules cannot be restored through Rule
+compilation.
+Updating a Rule preserves its current lifecycle status. Replaced Rules become archived.
+Lifecycle actions require explicit user instructions. `ARCHIVE` specifically requires
+explicit deletion, discard, or recycle-bin intent in the user's instruction. Requests
+to pause, disable, deactivate, retire, stop applying, or stop using a Rule use `PAUSE`.
 
 Jev judges Scenario irrelevance and Rule applicability. When Jev is unconfigured,
 unavailable, fails, or returns invalid results, the affected candidates pass without

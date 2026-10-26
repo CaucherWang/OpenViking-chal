@@ -208,8 +208,10 @@ Scenario 过滤阈值由 `rules.scenario_irrelevance_threshold` 配置；
 Rule 适用性使用 Rule 搜索请求中的 `rule_probability_threshold`（默认 `0.65`）。
 
 Rule 状态为 `active`、`paused`、`archived`。`PAUSE` 暂停检索但不设置清理期限；
-`ARCHIVE` 从 `archived_at` 开始计算保留期；`RESTORE` 可恢复两种状态为 active，
-并清除归档时间。编译候选只包含 active 和 paused Rule。
+`ARCHIVE` 从 `archived_at` 开始计算保留期；`RESTORE` 将 paused Rule 恢复为
+active。编译候选只包含 active 和 paused Rule；archived Rule 视为逻辑删除，不是
+编译候选，也无法通过 Rule 编译恢复。`ARCHIVE` 必须由用户指令明确表达删除、丢弃
+或移入回收站；不包含删除语义的停用请求使用 `PAUSE`。
 
 Rule 按 Scenario 直接存放在 `memories/rules/<scenario_id>/`：`abstract.md`
 保存场景元信息，`<atomic_id>.md` 保存规则。存储格式见

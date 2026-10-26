@@ -210,8 +210,11 @@ Rule matching always uses independent Noul judgments, so it has no `mode`,
 as `rule_probability_threshold` in the Rule search request (default `0.65`).
 
 Rule status is `active`, `paused`, or `archived`. `PAUSE` suspends retrieval without
-expiry; `ARCHIVE` starts retention from `archived_at`. `RESTORE` reactivates either
-state and clears that timestamp. Compilation considers active and paused Rules.
+expiry; `ARCHIVE` starts retention from `archived_at`. `RESTORE` reactivates a paused
+Rule. Compilation considers active and paused Rules; archived Rules are logically
+deleted, are not compiler candidates, and cannot be restored through Rule compilation.
+`ARCHIVE` requires explicit deletion, discard, or recycle-bin intent in the user's
+instruction; non-deletion deactivation requests use `PAUSE`.
 
 Rules live directly in `memories/rules/<scenario_id>/`: `abstract.md` stores Scenario
 metadata and `<atomic_id>.md` stores each Rule. See
