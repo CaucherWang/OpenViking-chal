@@ -38,14 +38,16 @@ revision、status、content、适用条件、例外和证据。`abstract` 是保
 Scenario 检索仅搜索 `*/abstract.md`，因此 Rule 文件不会占用 Scenario 候选数量。
 选中 Scenario 后，服务会读取其直属 Rule 文件。成员关系由目录决定，无需维护
 `rule_uris` 列表。暂停和归档的 Rule 会保留在所属 Scenario 中，直到生命周期清理
-移除超过保留期的归档 Rule。Rule 搜索使用 active Rule；编译同时考虑 active 和
-paused Rule。
+移除超过保留期的归档 Rule。Rule 搜索使用 active Rule；编译考虑 active 和 paused
+Rule。archived Rule 视为逻辑删除，不会出现在这两条路径中。
 
 Rule 状态包括 `active`、`paused` 和 `archived`。`PAUSE` 暂停 active Rule，
 但不安排清理；`ARCHIVE` 标记 Rule，使其在默认 30 天保留期后被清理，并记录
-`archived_at`，重复归档不会重置该时间。`RESTORE` 重新激活 paused 或 archived
-Rule，并清除 `archived_at`。更新 paused Rule 会将其重新激活。被替换的 Rule
-以及合并后的旧片段会转为 archived。生命周期操作必须由用户明确要求。
+`archived_at`，重复归档不会重置该时间。`RESTORE` 重新激活 paused Rule；archived
+Rule 无法通过 Rule 编译恢复。更新 Rule 会保留其当前生命周期状态。被替换的
+Rule 会转为 archived。生命周期操作必须由用户明确要求。其中 `ARCHIVE` 必须由
+用户指令明确表达删除、丢弃或移入回收站；暂停、禁用、停用、停止生效或暂不
+使用 Rule 的请求统一使用 `PAUSE`。
 
 Jev 判断 Scenario 是否无关以及 Rule 是否适用。当 Jev 未配置、不可用、调用失败
 或返回无效结果时，受影响候选会直接通过，不再进行 VLM 判断。Rule 判断失败时，
