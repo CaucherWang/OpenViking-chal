@@ -117,7 +117,7 @@ def test_compile_prompt_does_not_expose_memory_preference_fields():
     assert "REPLACE" in prompt
     assert "Infer the single semantic target" in prompt
     assert "use UNCERTAIN instead of" in prompt
-    assert "conditional branches into one Rule" in prompt
+    assert "conditional branches into one\n  RULE record" in prompt
     assert "Only NEW may include a non-null `scenario`" in prompt
     assert "SUPERSEDE" not in prompt
     assert "SPLIT" not in prompt
@@ -128,10 +128,20 @@ def test_compile_prompt_does_not_expose_memory_preference_fields():
     assert '"carried_over":' in prompt
     assert "Prefer a faithful, non-empty" in prompt
     assert "Never invent a trigger" in prompt
-    assert "Empty means the Rule applies in every situation" in prompt
+    assert "A rule is an explicit durable constraint" in prompt
+    assert "RULE records have higher priority than Memories" in prompt
+    assert "Empty means the rule applies in every situation" in prompt
+    assert "UPDATE must target exactly one active or paused RULE record" in prompt
+    assert "Keep its atomic_id, lifecycle status" in prompt
+    assert "An UPDATE may target additional" not in prompt
+    assert "Archived\n  RULE records are logically deleted" in prompt
+    assert "When deletion intent is absent or ambiguous, use PAUSE rather than ARCHIVE" in prompt
+    assert "cannot be restored through compilation" in prompt
+    assert "An active RULE record cannot be restored" in prompt
+    assert "policy" not in prompt.casefold()
 
 
-def test_rule_mutations_are_flat_and_replace_has_one_target():
+def test_rule_mutations_are_flat_and_update_and_replace_have_one_target():
     removed_comparison_field = "_".join(("nearest", "existing"))
     replacement = _record("replacement")
 
@@ -156,6 +166,12 @@ def test_rule_mutations_are_flat_and_replace_has_one_target():
             operation="REPLACE",
             target_ids=["old-rule", "other-rule"],
             record=replacement,
+        )
+    with pytest.raises(ValueError, match="UPDATE requires exactly one target_id"):
+        RuleMutation(
+            operation="UPDATE",
+            target_ids=["old-rule", "other-rule"],
+            record=_record("updated"),
         )
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         RuleMutation.model_validate(
@@ -901,7 +917,7 @@ async def test_replace_deletes_old_rule_and_creates_new_rule():
 
 
 @pytest.mark.asyncio
-async def test_update_reactivates_paused_rule():
+async def test_update_preserves_paused_rule_status():
     fs = _FS()
     service = RuleService()
     service.set_dependencies(
@@ -941,7 +957,7 @@ async def test_update_reactivates_paused_rule():
     by_uri = {operation["uri"]: operation["content"] for operation in fs.batch["operations"]}
     metadata = yaml.safe_load(by_uri[paused.uri].split("---", 2)[1])
     assert scenario.uri not in by_uri
-    assert metadata["status"] == "active"
+    assert metadata["status"] == "paused"
     assert metadata["revision"] == paused.revision + 1
     assert metadata["schema"] == RULE_SCHEMA
     assert "archived_at" not in metadata
@@ -985,27 +1001,28 @@ async def test_pause_and_archive_have_distinct_storage_and_restore_semantics(ope
     metadata = yaml.safe_load(writes[active.uri].split("---", 2)[1])
     assert metadata["schema"] == RULE_SCHEMA
 
-    await service._apply_plan(
-        RuleCompilePlan(
-            mutations=[RuleMutation(operation="RESTORE", target_ids=[stored.atomic_id])]
-        ),
-        existing_scenarios=[scenario],
-        existing_rules=[stored],
-        source_uris=[],
-        ctx=_ctx(),
-    )
-    restore_writes = {item["uri"]: item["content"] for item in fs.batch["operations"]}
-    assert set(restore_writes) == {active.uri}
-    assert scenario.uri not in restore_writes
-    fs.documents.update(restore_writes)
-    restored = await service._load_rule(active.uri, _ctx())
-    assert restored.status == "active"
-    assert restored.archived_at is None
-    assert restored.revision == stored.revision + 1
+    if operation == "PAUSE":
+        await service._apply_plan(
+            RuleCompilePlan(
+                mutations=[RuleMutation(operation="RESTORE", target_ids=[stored.atomic_id])]
+            ),
+            existing_scenarios=[scenario],
+            existing_rules=[stored],
+            source_uris=[],
+            ctx=_ctx(),
+        )
+        restore_writes = {item["uri"]: item["content"] for item in fs.batch["operations"]}
+        assert set(restore_writes) == {active.uri}
+        assert scenario.uri not in restore_writes
+        fs.documents.update(restore_writes)
+        restored = await service._load_rule(active.uri, _ctx())
+        assert restored.status == "active"
+        assert restored.archived_at is None
+        assert restored.revision == stored.revision + 1
 
 
 @pytest.mark.asyncio
-async def test_archive_is_idempotent_and_restore_resets_archived_at():
+async def test_archive_is_idempotent():
     service = RuleService()
     service.set_dependencies(
         fs=_FS(),
@@ -1043,27 +1060,6 @@ async def test_archive_is_idempotent_and_restore_resets_archived_at():
     )
     assert unchanged["_rules"][0].archived_at == archived_at
     assert unchanged["written_uris"] == []
-
-    restored = await service._apply_plan(
-        RuleCompilePlan(
-            mutations=[
-                RuleMutation(
-                    operation="RESTORE",
-                    target_ids=[archived.atomic_id],
-                    evidence_spans=["restore old rule"],
-                )
-            ]
-        ),
-        existing_scenarios=[scenario],
-        existing_rules=[archived],
-        source_uris=[],
-        ctx=_ctx(),
-        persist=False,
-    )
-    restored_rule = next(rule for rule in restored["_rules"] if rule.atomic_id == "old-rule")
-    assert restored_rule.status == "active"
-    assert restored_rule.archived_at is None
-
 
 @pytest.mark.asyncio
 async def test_cleanup_removes_only_rules_archived_for_full_retention_period():
@@ -1965,6 +1961,77 @@ def test_compile_plan_allows_paused_rule_update_and_replace():
         replacement,
         material="replace paused rule",
         existing_rules=[paused],
+    )
+
+
+@pytest.mark.parametrize("operation", ["NOOP", "UPDATE", "REPLACE", "PAUSE", "RESTORE"])
+def test_compile_plan_rejects_non_lifecycle_operations_on_archived_rule(operation):
+    archived = _stored_rule("archived-rule", status="archived")
+    kwargs = {
+        "operation": operation,
+        "target_ids": [archived.atomic_id],
+        "evidence_spans": ["change archived rule"],
+    }
+    if operation in {"UPDATE", "REPLACE"}:
+        kwargs["record"] = _record("changed")
+    if operation == "UPDATE":
+        kwargs["carried_over"] = {
+            "existing_requirements": ["Ask for confirmation before deleting files."]
+        }
+    plan = RuleCompilePlan(mutations=[RuleMutation(**kwargs)])
+
+    with pytest.raises(VLMFailedError, match="status archived"):
+        RuleService._validate_compile_plan(
+            plan,
+            material="change archived rule",
+            existing_rules=[archived],
+        )
+
+
+def test_compile_plan_rejects_restore_on_active_rule():
+    active = _stored_rule("active-rule")
+    plan = RuleCompilePlan(
+        mutations=[
+            RuleMutation(
+                operation="RESTORE",
+                target_ids=[active.atomic_id],
+                evidence_spans=["restore active rule"],
+            )
+        ]
+    )
+
+    with pytest.raises(VLMFailedError, match="status active"):
+        RuleService._validate_compile_plan(
+            plan,
+            material="restore active rule",
+            existing_rules=[active],
+        )
+
+
+def test_compile_plan_requires_archive_authorization_in_instruction_text():
+    active = _stored_rule("active-rule")
+    plan = RuleCompilePlan(
+        mutations=[
+            RuleMutation(
+                operation="ARCHIVE",
+                target_ids=[active.atomic_id],
+                evidence_spans=["delete active rule"],
+            )
+        ]
+    )
+
+    with pytest.raises(VLMFailedError, match="instruction_text"):
+        RuleService._validate_compile_plan(
+            plan,
+            material="compile this source\ndelete active rule",
+            instruction_text="compile this source",
+            existing_rules=[active],
+        )
+    RuleService._validate_compile_plan(
+        plan,
+        material="delete active rule",
+        instruction_text="delete active rule",
+        existing_rules=[active],
     )
 
 
