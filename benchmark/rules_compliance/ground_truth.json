@@ -1,0 +1,108 @@
+{
+  "schema": "rules-recall-ground-truth/v1",
+  "dataset": ".openviking/experiments/rules-compliance-20261016/repositories/manifest.json",
+  "policy": ".openviking/experiments/rules-compliance-20261016/sources/open_source_compliance_rules.md",
+  "method": "Manual trigger annotation from the frozen checkout. A Rule ID is positive only when repository files establish its trigger; satisfaction and violation are not part of the recall label.",
+  "repositories": [
+    {
+      "name": "OpenViking",
+      "applicable_rule_ids": ["R01", "R02", "R03", "R04", "R05", "R06", "R08", "R09", "R10", "R12", "R13", "R14", "R23", "R29", "R33", "R34"],
+      "trigger_evidence": ["LICENSE", "pyproject.toml", "Cargo.lock", "third_party/", "web-studio/package-lock.json", "README.md", "openviking/models/embeddings/"]
+    },
+    {
+      "name": "MineContext",
+      "applicable_rule_ids": ["R01", "R02", "R03", "R04", "R05", "R06", "R14", "R29", "R33"],
+      "trigger_evidence": ["LICENSE", "pyproject.toml", "package-lock.json", "frontend/externals/", "README.md"]
+    },
+    {
+      "name": "ai-app-lab",
+      "applicable_rule_ids": ["R01", "R02", "R03", "R04", "R05", "R06", "R07", "R09", "R10", "R12", "R13", "R14", "R29", "R33", "R34", "R35"],
+      "trigger_evidence": ["README.md", "APACHE_LICENSE", "ARK_LICENSE.md", "pyproject.toml", "demohouse/", "demohouse/multimodalkit_example/android/gradle/wrapper/gradle-wrapper.jar"]
+    },
+    {
+      "name": "SearchCLI",
+      "applicable_rule_ids": ["R01", "R02", "R05", "R06", "R14", "R29"],
+      "trigger_evidence": ["LICENSE", "package.json", "package-lock.json", "README.md"]
+    },
+    {
+      "name": "veScale",
+      "applicable_rule_ids": ["R01", "R02", "R03", "R04", "R05", "R08", "R09", "R10", "R11", "R12", "R13", "R14", "R29", "R31", "R33", "R34", "R35"],
+      "trigger_evidence": ["LICENSE", "NOTICE", "requirements.txt", "legacy/vescale/dtensor/device_mesh.py", "legacy/examples/llama2_4D_finetune/README.md"]
+    },
+    {
+      "name": "veadk-python",
+      "applicable_rule_ids": ["R01", "R02", "R05", "R06", "R14", "R29"],
+      "trigger_evidence": ["LICENSE", "pyproject.toml", "uv.lock", "frontend/package-lock.json", "README.md"]
+    },
+    {
+      "name": "rtc-aigc-embedded-demo",
+      "applicable_rule_ids": ["R01", "R02", "R03", "R04", "R07", "R26", "R29"],
+      "trigger_evidence": ["LICENSE.txt", "README.md", "client/espressif/esp32s3_demo/components/VolcEngineRTCLite/libs/esp32s3/LICENSE", "client/espressif/esp32s3_demo/components/VolcEngineRTCLite/libs/esp32s3/libVolcEngineRTCLite.a"]
+    },
+    {
+      "name": "mcp-server",
+      "applicable_rule_ids": ["R01", "R02", "R05", "R06", "R14", "R29"],
+      "trigger_evidence": ["LICENSE", "README.md", "server/mcp_server_aisearch/pyproject.toml", "server/mcp_server_aisearch/uv.lock"]
+    },
+    {
+      "name": "rtc-aigc-demo",
+      "applicable_rule_ids": ["R01", "R02", "R05", "R06", "R14", "R29"],
+      "trigger_evidence": ["LICENSE", "README.md", "package.json", "server/yarn.lock", "web/yarn.lock"]
+    },
+    {
+      "name": "veGiantModel",
+      "applicable_rule_ids": ["R01", "R02", "R03", "R04", "R05", "R07", "R08", "R09", "R10", "R29", "R33"],
+      "trigger_evidence": ["LICENSE", "README.md", ".gitmodules", "third_party/", "_lib/fastertransformer_training_v1/cu111/torch190/libfastertransformer.so", "examples/gpt/gpt_piped.py"]
+    },
+    {
+      "name": "mediakit-cli",
+      "applicable_rule_ids": ["R01", "R02", "R05", "R06", "R12", "R13", "R20", "R29", "R31"],
+      "trigger_evidence": ["LICENSE", "go.mod", "go.sum", "package.json", "Open Source Notice.txt", ".goreleaser.yml"]
+    },
+    {
+      "name": "volc-sdk-python",
+      "applicable_rule_ids": ["R01", "R02", "R05", "R12", "R13", "R29", "R31"],
+      "trigger_evidence": ["LICENSE", "setup.py", "requirements.txt", "Open Source Notice.txt"]
+    },
+    {
+      "name": "volcengine-python-sdk",
+      "applicable_rule_ids": ["R01", "R02", "R05", "R08", "R09", "R10", "R11", "R12", "R13", "R29", "R31"],
+      "trigger_evidence": ["LICENSE.txt", "NOTICE.md", "setup.py", "pyproject.toml"]
+    },
+    {
+      "name": "agentkit-sdk-python",
+      "applicable_rule_ids": ["R01", "R02", "R05", "R06", "R29"],
+      "trigger_evidence": ["LICENSE", "pyproject.toml", "requirements.txt", "docs/package-lock.json", "README.md"]
+    },
+    {
+      "name": "volc-sdk-golang",
+      "applicable_rule_ids": ["R01", "R02", "R05", "R06", "R12", "R13", "R29", "R31"],
+      "trigger_evidence": ["LICENSE", "go.mod", "go.sum", "Open Source Notice.txt"]
+    },
+    {
+      "name": "volcengine-go-sdk",
+      "applicable_rule_ids": ["R01", "R02", "R05", "R06", "R08", "R09", "R10", "R11", "R12", "R13", "R29", "R31"],
+      "trigger_evidence": ["LICENSE.txt", "NOTICE.txt", "go.mod", "go.sum", "volcengine/request/request.go"]
+    },
+    {
+      "name": "VolcEngineRTC",
+      "applicable_rule_ids": ["R01", "R03", "R04", "R05", "R07", "R09", "R10", "R12", "R13", "R14", "R26", "R29"],
+      "trigger_evidence": ["README.md", "Android/APIExample/app/build.gradle", "Android/APIExample/app/libs/ByteEffect.aar", "Windows/3rd/", "Web/QuickStart_Demo/BasicDemo/LICENSE"]
+    },
+    {
+      "name": "ark-cli",
+      "applicable_rule_ids": ["R01", "R02", "R05", "R14", "R29"],
+      "trigger_evidence": ["LICENSE", "README.md", "dsh-plugins/ark-plan-api/package.json", "dsh-plugins/ark-plan-api/LICENSE"]
+    },
+    {
+      "name": "veadk-go",
+      "applicable_rule_ids": ["R01", "R02", "R05", "R06", "R14", "R29"],
+      "trigger_evidence": ["LICENSE", "README.md", "go.mod", "go.sum"]
+    },
+    {
+      "name": "veadk-java",
+      "applicable_rule_ids": ["R01", "R02", "R05", "R14", "R29", "R37"],
+      "trigger_evidence": ["LICENSE", "README.md", "pom.xml", "core/pom.xml"]
+    }
+  ]
+}
