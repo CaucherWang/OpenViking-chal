@@ -145,7 +145,7 @@ When a channel enables `ov_tools_enable`, the Agent can use:
 |------|------------|
 | `openviking_list` | Browse a Viking URI directory |
 | `openviking_search` | Semantically search Resources, Memories, and Skills |
-| `openviking_rule_search` | Retrieve compiled Rules applicable to a concrete task context |
+| `openviking_rule_search` (Beta) | Retrieve compiled Rules applicable to a concrete task context |
 | `openviking_grep` | Run regular-expression searches over OpenViking content |
 | `openviking_glob` | Search URI paths with glob patterns |
 | `openviking_multi_read` | Read the full content of multiple URIs concurrently |

@@ -4,8 +4,6 @@ For its role and architecture, read [VikingBot](../concepts/15-vikingbot.md), th
 
 VikingBot is the multi-channel AI Agent built into OpenViking. It can start together with OpenViking, run independently for local debugging, or operate as a long-running Gateway connected to chat platforms.
 
-When connected to OpenViking, VikingBot also supports the `openviking_rule_search` [rule search tool (Beta)](../workflows/02-rule-validation.md), which retrieves applicable rules for a task.
-
 This guide covers installation and configuration for the three main usage scenarios. For complete documentation about Agent tools, chat channels, and architecture, see the [VikingBot documentation](https://github.com/volcengine/OpenViking/blob/main/bot/README.md).
 
 ## Installation

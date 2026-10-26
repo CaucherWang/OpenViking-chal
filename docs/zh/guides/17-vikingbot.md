@@ -4,8 +4,6 @@
 
 VikingBot 是 OpenViking 内置的多渠道 AI Agent。它既可以和 OpenViking 一起启动，也可以在本地独立调试，或作为长期运行的 Gateway 接入聊天平台。
 
-连接 OpenViking 后，VikingBot 还支持 `openviking_rule_search` [规则搜索工具（Beta）](../workflows/02-rule-validation.md)，可按任务召回适用规则。
-
 本指南介绍安装方式，以及三种主要使用场景的配置和启动方法。Agent 工具、聊天渠道、架构等完整说明请参见 [VikingBot 中文文档](https://github.com/volcengine/OpenViking/blob/main/bot/README_CN.md)。
 
 ## 安装

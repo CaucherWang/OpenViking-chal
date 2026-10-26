@@ -145,7 +145,7 @@ Experience 保存 Agent 过去完成任务时形成的可复用方法。VikingBo
 |------|------|
 | `openviking_list` | 浏览 Viking URI 目录 |
 | `openviking_search` | 对资源、记忆和 Skill 做语义检索 |
-| `openviking_rule_search` | 检索适用于具体任务上下文的已编译 Rules |
+| `openviking_rule_search`（Beta） | 检索适用于具体任务上下文的已编译 Rules |
 | `openviking_grep` | 在 OpenViking 内容中做正则搜索 |
 | `openviking_glob` | 按 URI 路径模式搜索 |
 | `openviking_multi_read` | 并发读取多个 URI 的完整内容 |
