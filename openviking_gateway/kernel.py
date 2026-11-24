@@ -28,6 +28,7 @@ from .compaction import (
     summary_instruction,
     window_size,
 )
+from .isolation import scoped_viking
 from .models import Policy
 from .notices import recall_notice
 from .observe import degrade
@@ -156,6 +157,10 @@ class MemoryKernel:
                 prepared = await self.prepare(body, protocol, *args, budget=budget, **kwargs)
             return prepared.body, prepared, prepared.metrics
         except Exception as error:
+            if len(args) > 1 and args[1].get("memory_isolation") == "trial":
+                # Isolation is a correctness boundary: never forward a trial after
+                # memory preparation failed.
+                raise VikingError("trial_memory_preparation_failed") from error
             metrics = {}
             if isinstance(error, asyncio.TimeoutError) and budget.expired:
                 logger.info("gateway preparation timed out; forwarding without memory")
@@ -254,6 +259,10 @@ class MemoryKernel:
         # matches, captures or forwards it, as replies were recorded without it.
         sent = adapter.strip_lead(sent)
         scope = digest(credential["account"] + "\0" + credential["user_id"] + "\0" + protocol)
+        if credential.get("peer_id"):
+            scope = digest(scope + "\0peer\0" + credential["peer_id"])
+            if credential.get("memory_isolation") == "trial":
+                scope = digest(scope + "\0trial")
         # Anchors, capture and recall read the history as the gateway relayed it;
         # the upstream still gets exactly what the client sent.
         messages, thinking = await self.sent_history(scope, sent, protocol)
@@ -405,6 +414,17 @@ class MemoryKernel:
                     "upstream_id": upstream["id"],
                     "policy": policy,
                     "credential_id": credential["id"],
+                    **(
+                        {
+                            "memory_isolation": credential["memory_isolation"],
+                            "memory_user": credential["user_id"],
+                            "dev_memory_namespace": credential.get(
+                                "dev_memory_namespace", False
+                            ),
+                        }
+                        if credential.get("memory_isolation") == "trial"
+                        else {}
+                    ),
                     "vendor": {
                         "prompt_cache_key": body.get("prompt_cache_key")
                         or "ovgw-" + digest(scope + sid)[:40],
@@ -602,7 +622,8 @@ class MemoryKernel:
             if budget - overhead < 64:
                 return {**decision, "reason": "budget"}
             try:
-                response = await self.viking.recall(
+                viking = scoped_viking(self.viking, credential, lineage(request.capture.value))
+                response = await viking.recall(
                     credential["openviking_key"],
                     query,
                     policy,
@@ -636,7 +657,8 @@ class MemoryKernel:
                 noted = True
                 return block("gateway-session-start", gateway_note(policy, tools)), []
             noted = bool(tools)
-            profile = await build_profile(self.viking, credential["openviking_key"], policy, tools)
+            viking = scoped_viking(self.viking, credential, lineage(request.capture.value))
+            profile = await build_profile(viking, credential["openviking_key"], policy, tools)
             request.metrics["profile_reason"] = profile["reason"]
             # After client-side compaction, the capture document still names the earlier sessions.
             hint = history_hint(

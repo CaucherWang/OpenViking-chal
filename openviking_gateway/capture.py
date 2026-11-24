@@ -25,6 +25,7 @@ from openviking.observability.log_safety import safe_log_fields, short_hash
 
 from .capture_store import Document
 from .client import without_deadline
+from .isolation import scoped_viking
 from .models import Policy
 from .notices import without_notices
 from .protocols import (
@@ -62,6 +63,10 @@ FIELDS = (
     "idle_at",
     "account",
     "credential_id",
+    "peer_id",
+    "memory_isolation",
+    "user_id",
+    "dev_memory_namespace",
 )
 
 
@@ -133,6 +138,20 @@ class CapturePipeline:
         old = request.capture
         while True:
             value = record_peers(current(old.value), request)
+            if request.peer:
+                value = {
+                    **value,
+                    "peer_id": request.peer,
+                    **(
+                        {
+                            "memory_isolation": "trial",
+                            "user_id": request.root.get("memory_user"),
+                            "dev_memory_namespace": request.root.get("dev_memory_namespace", False),
+                        }
+                        if request.root.get("memory_isolation") == "trial"
+                        else {}
+                    ),
+                }
             if value == old.value or await self.store.swap(
                 request.scope, request.session, old, value
             ):
@@ -167,18 +186,32 @@ class CapturePipeline:
         if not captured:
             return 0
         key, session = credential["openviking_key"], value["ov_session"]
+        viking = scoped_viking(self.viking, credential, (session,))
         committer = "openviking" if self.auto_commit else "gateway"
         sent = 0
         # The reply is out, or a summary call took the time: the request's budget is over.
         with without_deadline():
             # Also after the setting changed: the session then gets the other policy.
             if value.get("created") != committer:
-                await self.viking.create_session(key, session, policy, self.auto_commit)
+                await viking.create_session(key, session, policy, self.auto_commit)
             while captured:
                 batch, captured = captured[:BATCH], captured[BATCH:]
-                written = await self.viking.write(key, session, batch)
+                written = await viking.write(key, session, batch)
                 sent += len(batch)
-                mark = {"created": committer}
+                mark = {
+                    "created": committer,
+                    **(
+                        {
+                            field: credential[field]
+                            for field in (
+                                "peer_id", "memory_isolation", "user_id", "dev_memory_namespace"
+                            )
+                            if credential.get(field)
+                        }
+                        if credential.get("memory_isolation") == "trial"
+                        else {}
+                    ),
+                }
                 if ended and not captured:
                     mark["answered"] = request.capture_chain[-1]
                 if self.auto_commit:
@@ -231,7 +264,19 @@ class CapturePipeline:
                 return
             value = doc.value
             key = await self.management.get(value["account"], "keys", value["credential_id"])
-            if key and not await self.commit(key["openviking_key"], value["ov_session"], 0):
+            identity = {
+                **(key or {}),
+                **{
+                    field: value[field]
+                    for field in (
+                        "peer_id", "memory_isolation", "user_id", "dev_memory_namespace"
+                    )
+                    if value.get(field)
+                },
+            }
+            if key and not await self.commit(
+                key["openviking_key"], value["ov_session"], 0, identity
+            ):
                 return
             while doc:
                 done = {k: v for k, v in doc.value.items() if k != "idle_at"}
@@ -280,11 +325,13 @@ class CapturePipeline:
                     extra={"degraded": True, "error_type": type(error).__name__},
                 )
 
-    async def commit(self, key, session, keep):
+    async def commit(self, key, session, keep, identity=None):
         """Commit; False when it failed and a later try may succeed."""
         try:
             with without_deadline():
-                await self.viking.commit(key, session, keep)
+                await scoped_viking(self.viking, identity or {}, (session,)).commit(
+                    key, session, keep
+                )
         except Exception as error:
             error_code = (
                 safe_log_fields({"error_code": getattr(error, "reason", None)}).get("error_code")
