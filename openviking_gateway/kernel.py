@@ -28,10 +28,10 @@ from .compaction import (
     summary_instruction,
     window_size,
 )
-from .isolation import scoped_viking
 from .models import Policy
 from .notices import recall_notice
 from .observe import degrade
+from .peer_memory import contains, memory_root
 from .profile import build_profile
 from .protocols import (
     appended_request,
@@ -58,6 +58,7 @@ from .vendors import parameter_fingerprint
 from .windows import remind, status_line
 
 logger = logging.getLogger(__name__)
+PEER_MEMORY_SESSION = "peer-memory-"
 # State keys for unsigned thinking the gateway relayed, by digest of its text.
 THINKING = "thinking:"
 
@@ -157,10 +158,6 @@ class MemoryKernel:
                 prepared = await self.prepare(body, protocol, *args, budget=budget, **kwargs)
             return prepared.body, prepared, prepared.metrics
         except Exception as error:
-            if len(args) > 1 and args[1].get("memory_isolation") == "trial":
-                # Isolation is a correctness boundary: never forward a trial after
-                # memory preparation failed.
-                raise VikingError("trial_memory_preparation_failed") from error
             metrics = {}
             if isinstance(error, asyncio.TimeoutError) and budget.expired:
                 logger.info("gateway preparation timed out; forwarding without memory")
@@ -198,7 +195,7 @@ class MemoryKernel:
             for m in messages
         ], sorted(known)
 
-    async def identity(self, scope, messages, protocol, headers):
+    async def identity(self, scope, messages, protocol, headers, peer_memory_prefix=""):
         """Resolve the session and the sessions whose replies the history contains.
 
         Replies are matched in the chain flavour ``completed`` records them in. A
@@ -206,6 +203,8 @@ class MemoryKernel:
         latest reply it contains, or starts a new one when two sessions produced it.
         """
         sid = session_id(headers)
+        if sid and peer_memory_prefix:
+            sid = peer_memory_prefix + sid
         adapter = tool_protocol(protocol)
 
         def chains():
@@ -223,11 +222,25 @@ class MemoryKernel:
             a for a, m in zip(body_chain, messages, strict=True) if a and adapter.is_reply(m)
         ]
         owners = await self.store.replay.replies(scope, endpoints) if endpoints else {}
+        # Resolve replies only among sessions with the same memory boundary.
+        owners = {
+            anchor: {
+                owner for owner in sessions
+                if (
+                    owner.startswith(peer_memory_prefix) if peer_memory_prefix
+                    else not owner.startswith(PEER_MEMORY_SESSION)
+                )
+            }
+            for anchor, sessions in owners.items()
+        }
         anonymous = sid is None
         source = "header"
         if anonymous:
-            latest = next((owners[a] for a in reversed(endpoints) if a in owners), set())
-            sid = next(iter(latest)) if len(latest) == 1 else "anonymous-" + uuid.uuid4().hex
+            latest = next((owners[a] for a in reversed(endpoints) if owners.get(a)), set())
+            sid = (
+                next(iter(latest)) if len(latest) == 1
+                else peer_memory_prefix + "anonymous-" + uuid.uuid4().hex
+            )
             source = "reply_match" if len(latest) == 1 else "new"
         # A reply two sessions produced, such as a greeting, proves no inheritance.
         ancestors = sorted({next(iter(o)) for o in owners.values() if len(o) == 1} - {sid})
@@ -259,15 +272,17 @@ class MemoryKernel:
         # matches, captures or forwards it, as replies were recorded without it.
         sent = adapter.strip_lead(sent)
         scope = digest(credential["account"] + "\0" + credential["user_id"] + "\0" + protocol)
-        if credential.get("peer_id"):
-            scope = digest(scope + "\0peer\0" + credential["peer_id"])
-            if credential.get("memory_isolation") == "trial":
-                scope = digest(scope + "\0trial")
+        peer_memory_prefix = ""
+        if not policy.get("peer_allow_user_memory", True):
+            if peer in (None, "", "__self"):
+                raise VikingError("peer_memory_requires_actor", 400)
+            # Keep user-wide lifecycle management while separating replay by peer.
+            peer_memory_prefix = PEER_MEMORY_SESSION + digest(peer)[:32] + "-"
         # Anchors, capture and recall read the history as the gateway relayed it;
         # the upstream still gets exactly what the client sent.
         messages, thinking = await self.sent_history(scope, sent, protocol)
         sid, anonymous, chain, body_chain, ancestors, source = await self.identity(
-            scope, messages, protocol, headers
+            scope, messages, protocol, headers, peer_memory_prefix
         )
         as_text = (
             {a for a, m, s in zip(body_chain, messages, sent, strict=True) if m != s}
@@ -414,17 +429,6 @@ class MemoryKernel:
                     "upstream_id": upstream["id"],
                     "policy": policy,
                     "credential_id": credential["id"],
-                    **(
-                        {
-                            "memory_isolation": credential["memory_isolation"],
-                            "memory_user": credential["user_id"],
-                            "dev_memory_namespace": credential.get(
-                                "dev_memory_namespace", False
-                            ),
-                        }
-                        if credential.get("memory_isolation") == "trial"
-                        else {}
-                    ),
                     "vendor": {
                         "prompt_cache_key": body.get("prompt_cache_key")
                         or "ovgw-" + digest(scope + sid)[:40],
@@ -588,6 +592,11 @@ class MemoryKernel:
                 )
             )
         )
+        peer_root = None
+        if not policy.peer_allow_user_memory:
+            peer_root = memory_root(credential["user_id"], request.peer)
+            # Append last so the HTTP client's rolling exclusion cap retains this root.
+            exclude.append(f"viking://user/{credential['user_id']}/memories")
         budget = min(policy.max_tokens, policy.session_max_tokens - used)
         query = clean_text(unwrap_client(text_content(request.messages[request.anchor])))[
             : policy.query_max_chars
@@ -622,8 +631,7 @@ class MemoryKernel:
             if budget - overhead < 64:
                 return {**decision, "reason": "budget"}
             try:
-                viking = scoped_viking(self.viking, credential, lineage(request.capture.value))
-                response = await viking.recall(
+                response = await self.viking.recall(
                     credential["openviking_key"],
                     query,
                     policy,
@@ -632,6 +640,14 @@ class MemoryKernel:
                     **peer_argument(request.peer),
                 )
                 rendered = response.get("rendered") or ""
+                if peer_root and (
+                    (rendered and not response.get("entries"))
+                    or any(
+                        not isinstance(entry, dict) or not contains(peer_root, entry.get("uri"))
+                        for entry in response.get("entries", [])
+                    )
+                ):
+                    raise VikingError("peer_memory_recall_outside_scope")
                 text = lead + "\n" + rendered if rendered else ""
                 if text:
                     entries.extend(e for e in response.get("entries", []) if isinstance(e, dict))
@@ -657,8 +673,9 @@ class MemoryKernel:
                 noted = True
                 return block("gateway-session-start", gateway_note(policy, tools)), []
             noted = bool(tools)
-            viking = scoped_viking(self.viking, credential, lineage(request.capture.value))
-            profile = await build_profile(viking, credential["openviking_key"], policy, tools)
+            profile = await build_profile(
+                self.viking, credential["openviking_key"], policy, tools, peer_root=peer_root
+            )
             request.metrics["profile_reason"] = profile["reason"]
             # After client-side compaction, the capture document still names the earlier sessions.
             hint = history_hint(

@@ -18,6 +18,7 @@ import orjson
 from .capture_store import Document
 from .client import VikingError, peer_argument
 from .config import MOUNT_PATH
+from .peer_memory import memory_root, tool_arguments
 from .protocols import string_type
 from .state_store import get_state
 from .storage import digest
@@ -255,6 +256,14 @@ class ToolExecutor:
         return args
 
     async def _call(self, name, args):
+        if not self.policy.get("peer_allow_user_memory", True):
+            peer = self.request.peer
+            if not peer:
+                raise VikingError("peer_memory_requires_actor", 400)
+            args = tool_arguments(memory_root(self.credential["user_id"], peer), name, args)
+            return await self.viking.mcp(
+                "tools/call", self.key, {"name": name, "arguments": args}, peer=peer
+            )
         upload = TOOL_OVERRIDES.get(name, {}).get("attachment", False)
         index = args.pop("attachment_index", None) if upload else None
         file = None

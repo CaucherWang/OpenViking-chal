@@ -213,7 +213,7 @@ async def ls_dir(fetch, uri):
     return sorted(entries, key=lambda entry: entry["name"])
 
 
-async def build_profile(viking, key, policy, tools):
+async def build_profile(viking, key, policy, tools, *, peer_root=None):
     names = {tool["function"]["name"] for tool in tools}
     # The budget covers the profile and the catalogs; the soul is added whole.
     budget = policy.profile_max_tokens
@@ -257,9 +257,8 @@ async def build_profile(viking, key, policy, tools):
             return default
 
     async def memories():
-        if getattr(viking, "isolated_peer", False):
-            root = viking.peer_root + "/memories"
-        else:
+        root = peer_root
+        if root is None:
             space = await resolve_user_space(fetch)
             root = f"viking://user/{space}/memories"
         paths, requests = [], []
@@ -275,7 +274,7 @@ async def build_profile(viking, key, policy, tools):
         return root, dict(zip(paths, values, strict=True))
 
     async def skills():
-        if not catalog or budget < 4:
+        if peer_root is not None or not catalog or budget < 4:
             return ""
         result = await fetch("/api/v1/skills", {"node_limit": 200}, {})
         return format_skill_catalog(skill_groups(result), budget // 4)

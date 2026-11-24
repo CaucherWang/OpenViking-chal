@@ -282,6 +282,10 @@ async def gather_candidates(
                 excluded_count += 1
                 continue
             origin = origin_for_uri(base_uri, ctx.actor_peer_id, user_root)
+            # A broad or stale index result can still include a different peer.
+            # Enforce actor scope before any candidate body is read or rendered.
+            if peer_scope == "actor" and origin == "other_peer":
+                continue
             score = _score(item)
             penalty = penalties.get(category, 0.0) if origin == "other_peer" else 0.0
             built.append(

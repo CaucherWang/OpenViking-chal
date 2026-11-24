@@ -24,13 +24,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .capture import SWEEP_SECONDS
 from .client import CALL, CallContext, VikingClient, VikingError
 from .config import PUBLIC_OPENVIKING_URLS, GatewayConfig, normalize_url
-from .isolation import (
-    ACTOR_HEADER,
-    ISOLATION_HEADER,
-    peer_identity,
-    require_empty_parent,
-    scoped_viking,
-)
 from .kernel import MemoryKernel
 from .management import (
     import_vlm_objects,
@@ -261,7 +254,6 @@ def create_app(config: GatewayConfig, *, openviking_url: str, vlm_source=None, e
 
     async def authenticate(request, record):
         """Return the gateway key and a degradation when OV could not confirm it."""
-        peer, isolated = peer_identity(request.headers)
         key = request_credential(request)
         if key.startswith("sk-ant-oat"):
             raise GatewayError(
@@ -289,7 +281,7 @@ def create_app(config: GatewayConfig, *, openviking_url: str, vlm_source=None, e
         if call:
             # From here on, this account's circuit applies.
             call.circuit = credential.get("openviking_account", credential["account"])
-        if (reason := app.state.viking.unavailable_reason) and not isolated:
+        if reason := app.state.viking.unavailable_reason:
             # Like recall, skip the check while OV is down instead of waiting for its timeout.
             record.metrics["revocation_reason"] = reason
             return credential, "revocation_check_unavailable"
@@ -321,23 +313,6 @@ def create_app(config: GatewayConfig, *, openviking_url: str, vlm_source=None, e
                     "revoked gateway key cleanup failed; rejecting access", extra={"degraded": True}
                 )
             raise invalid
-        if peer:
-            credential = {
-                **credential,
-                "peer_id": peer,
-                **({"memory_isolation": "trial"} if isolated else {}),
-            }
-        if isolated:
-            # Dev mode otherwise resolves every request to the shared default user.
-            if identity.get("auth_mode") == "dev":
-                credential = {
-                    **credential,
-                    "user_id": "benchmark-trials-v1",
-                    "dev_memory_namespace": True,
-                }
-            await require_empty_parent(scoped_viking(app.state.viking, credential), credential)
-            request.state.isolated_peer = peer
-            request.state.memory_user = credential["user_id"]
         return credential, None
 
     if config.management_api:
@@ -466,10 +441,6 @@ def create_app(config: GatewayConfig, *, openviking_url: str, vlm_source=None, e
         if not record.deferred:
             record.metrics.setdefault("status", response.status_code)
             await record.emit()
-        if peer := getattr(request.state, "isolated_peer", None):
-            response.headers[ISOLATION_HEADER] = "trial"
-            response.headers[ACTOR_HEADER] = peer
-            response.headers["x-openviking-memory-user"] = request.state.memory_user
         return record.decorate(response)
 
     return app

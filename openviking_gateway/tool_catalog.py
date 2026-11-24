@@ -7,6 +7,7 @@ import copy
 import orjson
 
 from .notices import clip, tool_head
+from .peer_memory import PEER_MEMORY_TOOLS
 from .protocols import replays_reasoning
 from .tool_protocols import tool_protocol
 from .tool_protocols.common import PREFIX
@@ -90,7 +91,9 @@ def select_tools(catalog, policy):
     selected = []
     for tool in catalog:
         name = tool["name"]
-        if name in disabled:
+        if name in disabled or (
+            not policy.get("peer_allow_user_memory", True) and name not in PEER_MEMORY_TOOLS
+        ):
             continue
         override = TOOL_OVERRIDES.get(name, {})
         schema = copy.deepcopy(tool["inputSchema"])
