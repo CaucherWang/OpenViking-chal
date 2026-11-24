@@ -19,12 +19,14 @@ from pydantic import ValidationError
 from openviking.core.peer_id import normalize_peer_id
 from openviking.observability.log_safety import short_hash
 
+from .billing import HEADER as BILLING_HEADER
+from .billing import UpstreamBilling
 from .client import PEER_HEADER
+from .isolation import response_key, scoped_viking
 from .kernel import Budget
 from .models import KEY_PLACEHOLDER, Policy, validation_detail
 from .observe import GatewayError, RequestRecord, degrade, elapsed_ms, error_code
 from .protocols import HEARTBEAT_SECONDS, SSEDecoder, heartbeat, parse_body
-from .storage import digest
 from .tool_executor import ToolExecutor
 from .tool_loop import HiddenToolLoop, ToolLoopError
 from .tool_protocols import ResponseCapture, stream_failure, tool_protocol
@@ -356,6 +358,8 @@ class ProxyRequest:
         # The record under construction: what the request writes however it ends.
         self.metrics = self.record.metrics
         self.metrics.setdefault("kind", "passthrough")
+        self.billing = UpstreamBilling(self.metrics)
+        self.model_call = None
 
     async def run(self):
         if self.request.headers.get("upgrade", "").lower() == "websocket":
@@ -385,6 +389,7 @@ class ProxyRequest:
         self.started = time.monotonic()
         self.metrics["added_ms"] = elapsed_ms(self.record.started)
         self.record.attempted = True
+        self.model_call = self.begin_call("model", self.upstream, self.body)
         try:
             self.response = await open_upstream(
                 self.app.state.http,
@@ -396,6 +401,7 @@ class ProxyRequest:
                 allow_redirects=False,
             )
         except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            self.billing.end(self.model_call, error="upstream_unavailable")
             self.metrics["duration_ms"] = elapsed_ms(self.started)
             raise upstream_failure(error) from None
         self.metrics.update(
@@ -470,7 +476,7 @@ class ProxyRequest:
             )
         self.upstream = candidates[0]
         if self.path.startswith("/v1/responses/"):
-            identifier = digest(self.credential["id"] + self.path.split("/")[3])
+            identifier = response_key(self.credential, self.path.split("/")[3])
             mapping = await self.management.get(self.credential["account"], "responses", identifier)
             if not mapping:
                 raise GatewayError("response_unknown", "Unknown response for this key")
@@ -516,6 +522,15 @@ class ProxyRequest:
         elif self.raw and self.body is None:
             degrade(self.metrics, "unsafe_json")
         check_coding_plan(self.upstream)
+        if (
+            self.credential.get("memory_isolation") == "trial"
+            and self.protocol
+            and not self.prepared
+        ):
+            raise GatewayError(
+                "trial_memory_preparation_failed",
+                "Trial memory isolation requires a prepared request",
+            )
         if self.body:
             self.body = await self.outgoing(self.body, self.upstream, self.prepared)
             if self.prepared:
@@ -544,7 +559,9 @@ class ProxyRequest:
             raise SummaryError(f"summary_http_{error.status_code}") from error
         headers.setdefault("content-type", "application/json")
         body = await self.outgoing(body, upstream, prepared)
+        call = self.begin_call("summary", upstream, body)
         self.record.attempted = True
+        value, status = None, None
         try:
             async with self.app.state.http.post(
                 target,
@@ -556,11 +573,36 @@ class ProxyRequest:
                 ),
                 allow_redirects=False,
             ) as response:
+                status = response.status
+                raw = await response.read()
+                try:
+                    value = orjson.loads(raw)
+                except ValueError:
+                    if response.status < 300:
+                        raise
                 if response.status >= 300:
                     raise SummaryError(f"summary_http_{response.status}")
-                return orjson.loads(await response.read())
+                return value
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as error:
             raise SummaryError("summary_unavailable") from error
+        finally:
+            self.billing.end(
+                call,
+                status=status,
+                envelope=value,
+                usage=value.get("usage") if isinstance(value, dict) else None,
+                complete=isinstance(value, dict) and status is not None and status < 300,
+            )
+
+    def begin_call(self, kind, upstream, body):
+        headers = upstream_headers(upstream, self.request.headers)
+        return self.billing.begin(
+            kind,
+            upstream,
+            body,
+            authenticated=bool(upstream_key(upstream, self.request.headers)),
+            account_header=any(key.lower() == "chatgpt-account-id" for key in headers),
+        )
 
     async def relay(self):
         """Record a finished reply before the client receives its end."""
@@ -576,6 +618,14 @@ class ProxyRequest:
     async def finish(self):
         """Book an answered request and write its record; called once per answered request."""
         try:
+            assembler = self.capture.assembler
+            self.billing.end(
+                self.model_call,
+                status=self.response.status,
+                envelope=assembler.envelope if assembler else None,
+                usage=assembler.usage if assembler else self.capture.usage,
+                complete=self.capture.finished,
+            )
             self.metrics.update(self.capture.usage or {})
             if self.upstream.get("vendor") in ARK_VENDORS:
                 self.metrics["cache_min_tokens"] = self.upstream.get("cache_min_tokens", 1024)
@@ -602,7 +652,7 @@ class ProxyRequest:
                         await self.management.save(
                             self.credential["account"],
                             "responses",
-                            digest(self.credential["id"] + self.capture.response_id),
+                            response_key(self.credential, self.capture.response_id),
                             {
                                 "upstream_id": self.upstream["id"],
                                 "user_id": self.credential["user_id"],
@@ -675,7 +725,11 @@ class ProxyRequest:
     async def tool_response(self):
         response, prepared, capture = self.response, self.prepared, self.capture
         executor = ToolExecutor(
-            self.app.state.viking,
+            scoped_viking(
+                self.app.state.viking,
+                self.credential,
+                (prepared.capture.value.get("ov_session", ""),),
+            ),
             self.store,
             prepared,
             self.credential,
@@ -686,24 +740,40 @@ class ProxyRequest:
         loop = HiddenToolLoop(
             prepared, executor, self.store, capture, self.app.state.kernel.capture
         )
+        def record_round(adapter, upstream_response):
+            self.billing.end(
+                self.model_call,
+                status=upstream_response.status,
+                envelope=adapter.envelope,
+                usage=loop.round.usage,
+                complete=True,
+            )
+
+        loop.observe_upstream = record_round
         headers = {
             k.lower(): v
             for k, v in filtered_headers(response.headers).items()
             if k.lower() not in {"content-length", "etag", "content-encoding"}
         }
+        headers[BILLING_HEADER] = self.metrics["request_id"]
 
         async def send(payload, timeout):
             # A total tool deadline also bounds the whole continuation, body included.
-            return await open_upstream(
-                self.app.state.http,
-                "POST",
-                self.target,
-                self.config.upstream_timeout_seconds,
-                total=timeout,
-                data=orjson.dumps(payload),
-                headers=self.headers,
-                allow_redirects=False,
-            )
+            self.model_call = self.begin_call("tool_continuation", self.upstream, payload)
+            try:
+                return await open_upstream(
+                    self.app.state.http,
+                    "POST",
+                    self.target,
+                    self.config.upstream_timeout_seconds,
+                    total=timeout,
+                    data=orjson.dumps(payload),
+                    headers=self.headers,
+                    allow_redirects=False,
+                )
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                self.billing.end(self.model_call, error="upstream_unavailable")
+                raise
 
         completed = False
 
@@ -752,6 +822,11 @@ class ProxyRequest:
             async for _ in loop.run(response, send):
                 pass
         except (ToolLoopError, aiohttp.ClientError) as error:
+            self.billing.end(
+                self.model_call,
+                status=getattr(error, "status", None),
+                error=getattr(error, "code", "tool_loop_failed"),
+            )
             error = tool_failure(error)
             capture.complete = False
             degrade(self.metrics, "hidden_tool_loop_failed")
@@ -780,6 +855,7 @@ class ProxyRequest:
     async def observe_response(self):
         response, capture = self.response, self.capture
         headers = filtered_headers(response.headers)
+        headers[BILLING_HEADER] = self.metrics["request_id"]
         if "text/event-stream" in response.headers.get("content-type", ""):
             headers = {k: v for k, v in headers.items() if k.lower() != "content-length"}
 

@@ -9,6 +9,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
+from urllib.parse import urlencode
 
 import aiohttp
 from packaging.version import InvalidVersion, Version
@@ -138,6 +139,13 @@ class VikingClient:
         self.tools_cache, self.last_tools = TTLCache(ttl=300, capacity=1), None
         # Until a list has loaded once, a failed load is retried at most this often.
         self.tools_retry_at = 0.0
+        # Request-local copies may bind a benchmark trial to one peer. The shared
+        # client keeps these defaults and is never mutated.
+        self.peer_id = None
+        self.isolated_peer = False
+        self.peer_root = ""
+        self.peer_sessions = ()
+        self.dev_memory_user = None
 
     def budget(self, timeout):
         """``timeout``, cut to what is left of the request's OpenViking budget."""
@@ -185,7 +193,8 @@ class VikingClient:
                 headers={
                     "X-API-Key": key,
                     "Accept-Encoding": "identity",
-                    **peer_header(peer),
+                    **peer_header(peer or self.peer_id),
+                    **({"X-OpenViking-User": self.dev_memory_user} if self.dev_memory_user else {}),
                     **call_headers(),
                 },
                 timeout=aiohttp.ClientTimeout(total=timeout),
@@ -241,7 +250,8 @@ class VikingClient:
     async def recall(self, key, query, policy, exclude, budget, peer=None):
         if self.unavailable_reason:
             raise VikingError(self.unavailable_reason)
-        return await self.request(
+        peer = peer or self.peer_id
+        result = await self.request(
             "POST",
             "/api/v1/search/search",
             key,
@@ -249,19 +259,30 @@ class VikingClient:
                 "query": query,
                 "mode": "context",
                 "query_expansion": "off",
-                "context_type": policy.context_types,
+                "context_type": ["memory"] if self.isolated_peer else policy.context_types,
                 "max_tokens": budget,
                 "quotas": policy.quotas or None,
                 "score_threshold": policy.score_threshold,
                 "exclude_uris": exclude[-200:],
                 "rewrite": False,
-                **({"peer_scope": "actor"} if peer and policy.recall_peer_scope == "actor" else {}),
+                **(
+                    {"peer_scope": "actor"}
+                    if self.isolated_peer or (peer and policy.recall_peer_scope == "actor")
+                    else {}
+                ),
             },
             timeout=self.budget(policy.recall_timeout),
             peer=peer,
         )
+        if self.isolated_peer and any(
+            not self.peer_uri(entry.get("uri", "")) for entry in result.get("entries", [])
+        ):
+            raise VikingError("peer_scope_violation")
+        return result
 
     async def write(self, key, session, messages):
+        if self.peer_id:
+            messages = [{**message, "peer_id": self.peer_id} for message in messages]
         return await self.request(
             "POST", f"/api/v1/sessions/{session}/messages/batch", key, {"messages": messages}
         )
@@ -295,6 +316,12 @@ class VikingClient:
             memory_policy["working_memory"] = {"enabled": False}
         if policy.capture_memory_types is not None:
             memory_policy["memory_types"] = policy.capture_memory_types
+        if self.isolated_peer:
+            memory_policy.update(
+                working_memory={"enabled": False},
+                self={"enabled": False},
+                peer={"enabled": True},
+            )
         try:
             await self.request(
                 "POST",
@@ -309,6 +336,18 @@ class VikingClient:
         except VikingError as error:
             if error.status != 409:
                 raise
+            if self.isolated_peer:
+                # Memory policy is immutable for an existing session. Never resume
+                # one that could extract into the parent user's memory.
+                existing = await self.request("GET", f"/api/v1/sessions/{session}", key)
+                saved = existing.get("memory_policy") or {}
+                if (
+                    saved.get("self", {}).get("enabled") is not False
+                    or saved.get("peer", {}).get("enabled") is not True
+                    or saved.get("working_memory", {}).get("enabled") is not False
+                ):
+                    raise VikingError("trial_session_policy_mismatch")
+                return existing
             # The session exists: an earlier gateway version or the other setting created it.
             await self.request(
                 "PATCH",
@@ -363,6 +402,9 @@ class VikingClient:
         """Stateless Streamable HTTP MCP; accept both JSON and SSE responses."""
         from .protocols import SSEDecoder
 
+        if self.isolated_peer and method == "tools/call":
+            params = self.peer_tool_params(params or {})
+        peer = peer or self.peer_id
         with self.guarded((aiohttp.ClientError, ValueError, KeyError)):
             async with self.http.post(
                 self.base_url + "/mcp",
@@ -372,6 +414,7 @@ class VikingClient:
                     "MCP-Protocol-Version": "2025-06-18",
                     "Accept-Encoding": "identity",
                     **peer_header(peer),
+                    **({"X-OpenViking-User": self.dev_memory_user} if self.dev_memory_user else {}),
                     **call_headers(),
                 },
                 json={
@@ -399,6 +442,50 @@ class VikingClient:
                 if "error" in value:
                     raise VikingError("openviking_mcp_error")
                 return value["result"]
+
+    async def read_content(self, key, uri):
+        try:
+            return await self.request(
+                "GET", "/api/v1/content/read?" + urlencode({"uri": uri, "raw": "true"}), key
+            )
+        except VikingError as error:
+            if error.status == 404 or error.reason == "openviking_NOT_FOUND":
+                return None
+            raise
+
+    def peer_uri(self, uri, *, sessions=False):
+        roots = (self.peer_root, *self.peer_sessions) if sessions else (self.peer_root,)
+        return isinstance(uri, str) and any(
+            uri.rstrip("/") == root or uri.startswith(root + "/") for root in roots
+        ) and "%" not in uri and "\\" not in uri and not any(
+            part in {".", ".."} for part in uri.split("/")
+        )
+
+    def peer_tool_params(self, params):
+        """Restrict explicit OpenViking tools to the active benchmark peer."""
+        name, args = params.get("name"), dict(params.get("arguments") or {})
+        if name not in {"find", "search", "read", "list", "grep", "glob", "write", "health"}:
+            raise VikingError("tool_outside_trial_peer", 403)
+        for field in ("uri", "uris", "target_uri"):
+            values = args.get(field)
+            values = values if isinstance(values, list) else [values] if values else []
+            if any(not self.peer_uri(value, sessions=name != "write") for value in values):
+                raise VikingError("tool_outside_trial_peer", 403)
+        if name in {"find", "search"}:
+            if args.get("session_id"):
+                root = self.peer_root.split("/peers/")[0] + "/sessions/" + args["session_id"]
+                if root not in self.peer_sessions:
+                    raise VikingError("tool_outside_trial_peer", 403)
+            if name == "search" and args.get("mode") == "context":
+                args.pop("target_uri", None)
+                args.update(peer_scope="actor", context_type=["memory"])
+            else:
+                args["target_uri"] = args.get("target_uri") or self.peer_root
+        elif name in {"list", "grep", "glob"}:
+            args["uri"] = args.get("uri") or self.peer_root
+        elif name == "write" and not args.get("uri"):
+            raise VikingError("tool_outside_trial_peer", 403)
+        return {**params, "arguments": args}
 
     async def upload(self, token, filename, content):
         data = aiohttp.FormData()

@@ -257,8 +257,11 @@ async def build_profile(viking, key, policy, tools):
             return default
 
     async def memories():
-        space = await resolve_user_space(fetch)
-        root = f"viking://user/{space}/memories"
+        if getattr(viking, "isolated_peer", False):
+            root = viking.peer_root + "/memories"
+        else:
+            space = await resolve_user_space(fetch)
+            root = f"viking://user/{space}/memories"
         paths, requests = [], []
         for path, wanted in (("soul.md", policy.soul), ("profile.md", profiled)):
             if wanted:
